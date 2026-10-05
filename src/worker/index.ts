@@ -25,15 +25,15 @@ async function runWorkerCycle() {
     }
 
     console.log(`[Worker] Đang quét nhóm "${group.name}" (Chu kỳ ${group.check_interval_seconds}s)...`);
-    
+
     try {
       const crawlResult = await groupCrawler.crawlGroup(group.url, group.lookback_hours);
-      
-      // Update group check timestamp
+
+      // Update group check timestamp & permission
       store.updateGroup(group.id, {
         last_checked_at: new Date().toISOString(),
         next_check_at: new Date(Date.now() + group.check_interval_seconds * 1000).toISOString(),
-        can_page_comment: crawlResult.canPageComment ?? true,
+        can_page_comment: crawlResult.canPageComment ?? group.can_page_comment,
       });
 
       if (!crawlResult.success) {
@@ -61,10 +61,10 @@ async function runWorkerCycle() {
 
         if (isNew) {
           newPostsCount++;
-          // Classify
-          const classification = classifyPostContent(post.content_raw, services, templates);
-          post.classification = {
-            id: `cls-${Date.now()}`,
+          // Classify with Vietnam timezone accuracy
+          const classification = classifyPostContent(post.content_raw, services, templates, post.posted_at);
+          const classificationData = {
+            id: `cls-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
             post_id: post.id,
             intent: classification.intent,
             service_detected: classification.service_detected,
@@ -78,8 +78,11 @@ async function runWorkerCycle() {
             classification_reason: classification.classification_reason,
             suggested_template_id: classification.suggested_template_id,
             suggested_comment_text: classification.suggested_comment_text,
-            review_status: classification.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
+            review_status: (classification.intent === 'looking_for_service' ? 'pending_review' : 'dismissed') as any,
           };
+
+          // CRITICAL FIX: Persist classification directly to shared store!
+          store.updatePostClassification(post.id, classificationData);
 
           console.log(`[Worker] Bài mới từ ${post.author_name}: Ý định = ${classification.intent} (${classification.confidence_score}%)`);
 
@@ -91,7 +94,7 @@ async function runWorkerCycle() {
             classification.suggested_comment_text
           ) {
             console.log(`[Worker] Tự động đăng bình luận tiếp cận cho bài: ${post.post_url}`);
-            store.dispatchComment(post.id, classification.suggested_comment_text, 'Worker Auto-Bot');
+            await store.dispatchComment(post.id, classification.suggested_comment_text, 'Worker Auto-Bot');
           }
         }
       }
@@ -120,7 +123,7 @@ async function startWorker() {
   console.log('================================================================');
   console.log('MAISON MIPA LEAD HUB - KHỞI ĐỘNG BỘ CHẠY NỀN TRUNG TÂM (WORKER)');
   console.log('================================================================');
-  
+
   // Run first cycle immediately
   await runWorkerCycle();
 

@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # 1. Redis for BullMQ Job Queues & Distributed Locks
   redis:
     image: redis:7-alpine
     container_name: mipa-redis
@@ -15,6 +16,27 @@ services:
       timeout: 5s
       retries: 5
 
+  # 2. Shared Database (PostgreSQL with RLS Schema support)
+  postgres:
+    image: postgres:16-alpine
+    container_name: mipa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mipa_lead_hub
+      POSTGRES_USER: mipa_admin
+      POSTGRES_PASSWORD: mipa_secure_password_2026!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mipa_admin -d mipa_lead_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 3. Next.js Web App Management & API Interface
   web:
     build:
       context: .
@@ -26,12 +48,18 @@ services:
     environment:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=${DATABASE_URL:-file:./data/mipa.db}
+      - DATABASE_URL=postgresql://mipa_admin:mipa_secure_password_2026!@postgres:5432/mipa_lead_hub
       - NEXT_PUBLIC_APP_NAME=Maison MIPA Lead Hub
+    volumes:
+      # CRITICAL: Mount shared data folder so web and worker share exact persistent state & sessions
+      - shared_data:/app/data
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
 
+  # 4. Centralized Background Worker (Playwright Engine)
   worker:
     build:
       context: .
@@ -41,11 +69,19 @@ services:
     environment:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=${DATABASE_URL:-file:./data/mipa.db}
+      - DATABASE_URL=postgresql://mipa_admin:mipa_secure_password_2026!@postgres:5432/mipa_lead_hub
       - PLAYWRIGHT_HEADLESS=true
+      - WORKER_POLL_INTERVAL_DEFAULT=150
+    volumes:
+      # CRITICAL: Mount exact same shared volume for data, groups, posts, and auth cookies
+      - shared_data:/app/data
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
 volumes:
   redis_data:
+  postgres_data:
+  shared_data:

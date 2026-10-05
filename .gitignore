@@ -12,6 +12,8 @@ dist/
 # Security & Facebook Sessions (CRITICAL)
 data/auth/*.json
 data/auth/*.enc
+data/*.json
+scratch/
 .env*.local
 .env.production
 .env

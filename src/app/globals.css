@@ -3,44 +3,44 @@
 @tailwind utilities;
 
 :root {
-  --foreground-rgb: 248, 250, 252;
-  --background-rgb: 15, 17, 23;
+  --foreground-rgb: 244, 244, 245;
+  --background-rgb: 9, 11, 16;
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: #0d0f15;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  background: #090b10;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   min-height: 100vh;
 }
 
-/* Glassmorphism custom helpers */
+/* Professional Studio Panels */
 .glass-panel {
-  background: rgba(22, 27, 38, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: #11141c;
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .glass-card {
-  background: rgba(26, 32, 46, 0.6);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #141822;
+  border: 1px solid rgba(255, 255, 255, 0.07);
 }
 
-/* Custom Scrollbars */
+.glass-card:hover {
+  border-color: rgba(217, 119, 6, 0.35);
+}
+
+/* Compact, clean scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f1117;
+  background: #090b10;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2b3345;
-  border-radius: 3px;
+  background: #272d3b;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #c5874f;
+  background: #d97706;
 }
