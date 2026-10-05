@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Next.js build output
+.next/
+out/
+build/
+dist/
+
+# Security & Facebook Sessions (CRITICAL)
+data/auth/*.json
+data/auth/*.enc
+.env*.local
+.env.production
+.env
+
+# Debug and Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# OS and Editor
+.DS_Store
+*.pem
+.vscode/
+.idea/

@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mipa-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mipa-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=${DATABASE_URL:-file:./data/mipa.db}
+      - NEXT_PUBLIC_APP_NAME=Maison MIPA Lead Hub
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: mipa-worker
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=${DATABASE_URL:-file:./data/mipa.db}
+      - PLAYWRIGHT_HEADLESS=true
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:
