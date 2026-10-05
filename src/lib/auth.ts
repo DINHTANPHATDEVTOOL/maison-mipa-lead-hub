@@ -1,5 +1,7 @@
 import { UserRole } from '@/types';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 export interface AuthUser {
   id: string;
@@ -44,18 +46,58 @@ const RUNTIME_APP_SECRET = process.env.APP_SECRET?.trim() || crypto.randomBytes(
 // MUST be explicitly configured with at least 16 characters. NO public fallback!
 const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY?.trim() || null;
 
-// Revoked token blacklist (in-memory per runtime, covers logout revocation)
+// Persistent token revocation blacklist
+const REVOKED_TOKENS_FILE = path.join(process.cwd(), 'data', 'revoked_tokens.json');
 const REVOKED_TOKENS = new Set<string>();
+
+function loadRevokedTokens(): void {
+  try {
+    if (fs.existsSync(REVOKED_TOKENS_FILE)) {
+      const raw = fs.readFileSync(REVOKED_TOKENS_FILE, 'utf-8');
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        list.forEach((t: string) => REVOKED_TOKENS.add(t));
+      }
+    }
+  } catch {
+    // Ignore initial read error
+  }
+}
+
+// Initial load on module evaluation
+loadRevokedTokens();
 
 export function revokeToken(token: string): void {
   if (token && typeof token === 'string') {
-    REVOKED_TOKENS.add(token.trim());
+    const t = token.trim();
+    REVOKED_TOKENS.add(t);
+    try {
+      const dataDir = path.dirname(REVOKED_TOKENS_FILE);
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+      fs.writeFileSync(REVOKED_TOKENS_FILE, JSON.stringify(Array.from(REVOKED_TOKENS), null, 2), 'utf-8');
+    } catch (e) {
+      console.error('[Auth] Lỗi khi ghi lưu revoked_tokens:', e);
+    }
   }
 }
 
 export function isTokenRevoked(token: string): boolean {
   if (!token || typeof token !== 'string') return true;
-  return REVOKED_TOKENS.has(token.trim());
+  const t = token.trim();
+  if (REVOKED_TOKENS.has(t)) return true;
+  try {
+    if (fs.existsSync(REVOKED_TOKENS_FILE)) {
+      const raw = fs.readFileSync(REVOKED_TOKENS_FILE, 'utf-8');
+      const list: string[] = JSON.parse(raw);
+      if (Array.isArray(list) && list.includes(t)) {
+        REVOKED_TOKENS.add(t);
+        return true;
+      }
+    }
+  } catch {}
+  return false;
 }
 
 /**

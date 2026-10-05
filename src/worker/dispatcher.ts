@@ -185,9 +185,8 @@ export class FacebookCommentDispatcher {
               continue;
             }
 
-            // 2. Full Content verification (must match full content, not just a 35-character prefix)
-            const isContentFullMatch = cleanText.includes(cleanTargetContent) || 
-              (cleanTargetContent.length > 20 && cleanText.includes(cleanTargetContent.slice(0, Math.min(cleanTargetContent.length, 120))));
+            // 2. Full Content verification (must match FULL comment content, never just a prefix or 120 chars)
+            const isContentFullMatch = cleanText.includes(cleanTargetContent);
             if (!isContentFullMatch) {
               continue;
             }
@@ -196,16 +195,23 @@ export class FacebookCommentDispatcher {
             const authorMatchesName = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
             let authorMatchesId = true;
             if (targetPageId) {
-              const anchorHref = permalinkAnchor?.href || '';
-              const authorAnchor = el.querySelector('a[role="link"], a[href*="facebook.com"]') as HTMLAnchorElement | null;
+              // Strictly query author elements: NEVER touch permalinkAnchor (which contains post ID or story_fbid!)
+              const authorAnchor = el.querySelector(
+                'h3 a, h4 a, a[role="link"]:not([href*="comment_id="]):not([href*="/posts/"]):not([href*="story_fbid="]), a[data-hovercard*="id="], a[data-profileid], a[data-page-id], a[href*="profile.php"]'
+              ) as HTMLAnchorElement | null;
               const authorHref = authorAnchor?.href || '';
-              const combinedVoiceInfo = `${authorText} ${anchorHref} ${authorHref}`;
-              const idMatch = combinedVoiceInfo.match(/(?:page\s*id[:=\s]+|\/|id=)([0-9]{3,})/i) || combinedVoiceInfo.match(/\b([0-9]{3,})\b/);
-              if (idMatch && idMatch[1] !== targetPageId) {
-                authorMatchesId = false; // Conflicting Page ID!
-              } else if (combinedVoiceInfo.includes(targetPageId)) {
-                authorMatchesId = true;
-              } else if (!authorMatchesName) {
+              const authorHovercard = authorAnchor?.getAttribute('data-hovercard') || '';
+              const authorDataId = authorAnchor?.getAttribute('data-page-id') || authorAnchor?.getAttribute('data-profileid') || '';
+              const authorInfo = `${authorText} ${authorHref} ${authorHovercard} ${authorDataId}`;
+
+              const authorIdMatch = authorInfo.match(/(?:page\s*id[:=\s]+|\/|id=|user\/)([0-9]{3,})/i) ||
+                                    authorInfo.match(/\b([0-9]{3,})\b/);
+              if (authorIdMatch && authorIdMatch[1] !== targetPageId) {
+                authorMatchesId = false; // Conflicting Page ID in author link/tag
+              } else if (authorInfo.includes(targetPageId)) {
+                authorMatchesId = true; // Proof of target Page ID verified
+              } else {
+                // When targetPageId is configured, missing proof of ID must NOT match!
                 authorMatchesId = false;
               }
             }
@@ -215,32 +221,35 @@ export class FacebookCommentDispatcher {
               continue;
             }
 
-            // 4. Freshness verification: Bằng chứng bình luận vừa được tạo
-            // Check recency indicators vs old timestamp indicators
+            // 4. Freshness verification: Bằng chứng bình luận vừa được tạo SAU lần gửi
             const timeEl = el.querySelector('abbr, time, span[id*="timestamp"], a[href*="comment_id="] span');
             const timeText = (timeEl?.textContent || el.textContent || '').toLowerCase();
 
-            // Indicators that a comment is OLD (hours, days, weeks, months, years ago)
-            const isOldComment = /\b([2-9]|[1-9][0-9]+)\s*(?:giờ|tiếng|ngày|tuần|tháng|năm|hours?|days?|weeks?|months?|years?|h|d|w|m|y)\b/i.test(timeText) ||
+            // Indicators that a comment is OLD (minutes, hours, days, weeks, months, years ago)
+            const isOldComment = /\b([0-9]+)\s*(?:phút|min|mins|minute|minutes|giờ|tiếng|ngày|tuần|tháng|năm|hours?|days?|weeks?|months?|years?|m|h|d|w|y)\b/i.test(timeText) ||
                                  /\b(hôm qua|yesterday|thứ\s+[hai|ba|tư|năm|sáu|bảy|nhật]|tháng\s+[0-9]+)\b/i.test(timeText);
 
-            // Freshness evidence: "vừa xong", "vừa gửi", "giây", "1 phút", "just now", "now",
-            // OR time attribute created within 3 minutes of submission
+            // Freshness evidence: Must be created AT or AFTER submissionTime (never before!)
             let hasFreshnessProof = false;
-            const recencyMatch = /\b(vừa xong|vừa gửi|giây|vài giây|1 phút|just now|seconds? ago|few seconds|1m|now)\b/i.test(timeText);
-            if (recencyMatch) {
-              hasFreshnessProof = true;
-            }
 
+            // Check timeTag datetime if available
             const timeTag = el.querySelector('time') as HTMLTimeElement | null;
             if (timeTag) {
               const dt = timeTag.getAttribute('datetime');
               if (dt) {
                 const parsed = Date.parse(dt);
-                if (!isNaN(parsed) && Math.abs(parsed - submissionTime) < 180000) {
+                // Must be >= submissionTime - 3000ms (3s grace period for clock drift) and not in the far future
+                if (!isNaN(parsed) && parsed >= (submissionTime - 3000) && parsed <= (Date.now() + 30000)) {
                   hasFreshnessProof = true;
                 }
               }
+            }
+
+            // Instant text recency: "vừa xong", "vừa gửi", "vài giây", "x giây", "just now", "now", "few seconds", "seconds ago"
+            // (Note: strictly excludes "phút", "minutes", "1m")
+            const recencyMatch = /\b(vừa xong|vừa gửi|vài giây|[0-9]{1,2}\s*giây|just now|few seconds|[0-9]{1,2}s\b|seconds?\s+ago)\b/i.test(timeText);
+            if (recencyMatch && !isOldComment) {
+              hasFreshnessProof = true;
             }
 
             // If it is explicitly an old comment or lacks freshness proof, DO NOT confirm!
@@ -360,17 +369,12 @@ export class FacebookCommentDispatcher {
             // Conflicting Page ID detected!
             return false;
           }
-          // Must explicitly include the required targetPageId
-          if (voice.includes(targetPageId)) {
-            return true;
-          }
-          // If no numbers/IDs exist in voice string, check name ONLY if no conflicting ID was detected
-          if (!anyIdMatch && vLower.includes(tLower)) {
-            return true;
-          }
-          return false;
+          // STRICT REQUIREMENT: When targetPageId is configured, must have explicit proof of matching ID!
+          // NEVER fall back to name-only when Page ID cannot be read or is missing.
+          return voice.includes(targetPageId);
         }
 
+        // Only fall back to name matching when no targetPageId is configured
         return vLower.includes(tLower);
       };
 

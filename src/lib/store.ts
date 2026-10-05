@@ -36,6 +36,7 @@ interface LockOwnerInfo {
 }
 
 interface StoreData {
+  _version?: number;
   groups: FacebookGroup[];
   services: ServiceItem[];
   templates: OutreachTemplate[];
@@ -64,132 +65,205 @@ class LeadHubSharedStore {
 
   private currentLockOwnerId: string | null = null;
 
-  // --- Concurrency Control (Fencing Token Lock with Cross-Container Protection) ---
+  // --- Concurrency Control (Fencing Token Lock with OCC & Transaction Protection) ---
   private withFileLock<T>(fn: () => T, timeoutMs: number = 45000): T {
-    const start = Date.now();
-    const ownerId = crypto.randomUUID();
-    let acquired = false;
+    let transactionAttempts = 0;
+    const maxTransactionAttempts = 3;
 
-    while (!acquired) {
-      try {
-        fs.mkdirSync(LOCK_DIR);
-        acquired = true;
+    while (transactionAttempts < maxTransactionAttempts) {
+      transactionAttempts++;
+      const start = Date.now();
+      const ownerId = crypto.randomUUID();
+      let acquired = false;
 
-        // Write lock owner record with generous lease (120s)
-        const ownerInfo: LockOwnerInfo = {
-          ownerId,
-          pid: process.pid,
-          acquiredAt: Date.now(),
-          lastHeartbeat: Date.now(),
-          leaseExpiresAt: Date.now() + 120000,
-        };
-        fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
-        this.currentLockOwnerId = ownerId;
+      while (!acquired) {
+        try {
+          fs.mkdirSync(LOCK_DIR);
+          acquired = true;
 
-      } catch (err: any) {
-        if (err.code === 'EEXIST') {
-          // Lock is held by another process or container
-          try {
-            if (fs.existsSync(OWNER_FILE)) {
-              const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
-              const ownerData: LockOwnerInfo = JSON.parse(rawOwner);
+          // Write lock owner record with generous lease (120s)
+          const ownerInfo: LockOwnerInfo = {
+            ownerId,
+            pid: process.pid,
+            acquiredAt: Date.now(),
+            lastHeartbeat: Date.now(),
+            leaseExpiresAt: Date.now() + 120000,
+          };
+          fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
+          this.currentLockOwnerId = ownerId;
 
-              // ONLY clean up if the lock is genuinely stale (>120s abandoned by crashed process)
-              if (Date.now() > ownerData.leaseExpiresAt) {
-                console.warn(`[SharedStore] Phát hiện khóa cũ đã quá hạn 120s. Thu hồi khóa.`);
-                try { fs.unlinkSync(OWNER_FILE); } catch {}
-                try { fs.rmdirSync(LOCK_DIR); } catch {}
-                continue;
+        } catch (err: any) {
+          if (err.code === 'EEXIST') {
+            // Lock is held by another process or container
+            try {
+              if (fs.existsSync(OWNER_FILE)) {
+                const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
+                const ownerData: LockOwnerInfo = JSON.parse(rawOwner);
+
+                // ONLY clean up if the lock is genuinely stale (>120s abandoned by crashed process)
+                if (Date.now() > ownerData.leaseExpiresAt) {
+                  console.warn(`[SharedStore] Phát hiện khóa cũ đã quá hạn 120s. Thu hồi khóa.`);
+                  try { fs.unlinkSync(OWNER_FILE); } catch {}
+                  try { fs.rmdirSync(LOCK_DIR); } catch {}
+                  continue;
+                }
+
+                // Lock is actively held: DO NOT STEAL! Wait patiently.
+                if (Date.now() - start > timeoutMs) {
+                  throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms. Khóa đang được giữ bởi tiến trình khác.`);
+                }
+
+              } else {
+                // Lock directory exists but owner.json not yet written or stale directory
+                const stats = fs.statSync(LOCK_DIR);
+                if (Date.now() - stats.mtimeMs > 120000) {
+                  try { fs.rmdirSync(LOCK_DIR); } catch {}
+                  continue;
+                }
+
+                if (Date.now() - start > timeoutMs) {
+                  throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms.`);
+                }
               }
-
-              // Lock is actively held: DO NOT STEAL! Wait patiently.
-              if (Date.now() - start > timeoutMs) {
-                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms. Khóa đang được giữ bởi tiến trình khác.`);
-              }
-
-            } else {
-              // Lock directory exists but owner.json not yet written or stale directory
-              const stats = fs.statSync(LOCK_DIR);
-              if (Date.now() - stats.mtimeMs > 120000) {
-                try { fs.rmdirSync(LOCK_DIR); } catch {}
-                continue;
-              }
-
-              if (Date.now() - start > timeoutMs) {
-                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms.`);
+            } catch (inspectErr: any) {
+              if (inspectErr.message.includes('Timeout')) {
+                throw inspectErr;
               }
             }
-          } catch (inspectErr: any) {
-            if (inspectErr.message.includes('Timeout')) {
-              throw inspectErr;
-            }
-          }
 
-          // Backoff delay
-          const delayMs = 25;
-          try {
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
-          } catch {
-            const waitEnd = Date.now() + delayMs;
-            while (Date.now() < waitEnd) {}
+            // Backoff delay
+            const delayMs = 25;
+            try {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+            } catch {
+              const waitEnd = Date.now() + delayMs;
+              while (Date.now() < waitEnd) {}
+            }
+          } else {
+            throw err;
           }
-        } else {
-          throw err;
         }
       }
-    }
 
-    try {
-      return fn();
-    } finally {
       try {
-        if (fs.existsSync(OWNER_FILE)) {
-          const raw = fs.readFileSync(OWNER_FILE, 'utf-8');
-          const current = JSON.parse(raw);
-          if (current.ownerId === ownerId) {
-            fs.unlinkSync(OWNER_FILE);
+        return fn();
+      } catch (err: any) {
+        if (err.message?.includes('OCC Conflict') && transactionAttempts < maxTransactionAttempts) {
+          console.warn(`[SharedStore] Phát hiện xung đột phiên bản ghi (OCC Conflict). Thử lại giao dịch (lần ${transactionAttempts}/${maxTransactionAttempts})...`);
+          const delayMs = 30 * transactionAttempts;
+          const waitEnd = Date.now() + delayMs;
+          while (Date.now() < waitEnd) {}
+          continue;
+        }
+        throw err;
+      } finally {
+        try {
+          if (fs.existsSync(OWNER_FILE)) {
+            const raw = fs.readFileSync(OWNER_FILE, 'utf-8');
+            const current = JSON.parse(raw);
+            if (current.ownerId === ownerId) {
+              fs.unlinkSync(OWNER_FILE);
+              fs.rmdirSync(LOCK_DIR);
+            }
+          } else if (fs.existsSync(LOCK_DIR)) {
             fs.rmdirSync(LOCK_DIR);
           }
-        } else if (fs.existsSync(LOCK_DIR)) {
-          fs.rmdirSync(LOCK_DIR);
-        }
-      } catch {
-        // ignore lock release errors
-      } finally {
-        if (this.currentLockOwnerId === ownerId) {
-          this.currentLockOwnerId = null;
+        } catch {
+          // ignore lock release errors
+        } finally {
+          if (this.currentLockOwnerId === ownerId) {
+            this.currentLockOwnerId = null;
+          }
         }
       }
     }
+
+    throw new Error('[SharedStore] Giao dịch thất bại sau nhiều lần thử lại do xung đột dữ liệu.');
   }
 
-  // --- Persistence Layer (Atomic File Sync with Fencing Token & Error Propagation) ---
+  // --- Persistence Layer (Atomic File Sync with Fencing Token, OCC & Transaction Protection) ---
   private readData(): StoreData {
     if (fs.existsSync(STORE_FILE)) {
       const raw = fs.readFileSync(STORE_FILE, 'utf-8');
-      return JSON.parse(raw);
+      const data: StoreData = JSON.parse(raw);
+      if (typeof data._version !== 'number') {
+        data._version = 1;
+      }
+      return data;
     }
     return this.getInitialSeed();
   }
 
   private writeData(data: StoreData): void {
+    const baseVersion = data._version ?? 1;
+
     // FENCING TOKEN CHECK: Never allow writing if lock was lost or stolen!
     if (this.currentLockOwnerId) {
-      if (!fs.existsSync(OWNER_FILE)) {
-        throw new Error('[SharedStore] Giao dịch ghi bị hủy: Khóa ghi không còn tồn tại trên hệ thống tệp.');
-      }
-      const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
-      const owner = JSON.parse(rawOwner);
-      if (owner.ownerId !== this.currentLockOwnerId) {
-        throw new Error('[SharedStore] Giao dịch ghi bị hủy: Quyền sở hữu khóa đã bị thay đổi hoặc hết hạn. Từ chối ghi đè dữ liệu.');
-      }
+      this.assertLockOwnership();
     }
 
-    // Write to temp file then atomic rename.
-    // Throws immediately on disk I/O errors (EIO, ENOSPC, EACCES) to prevent false successes!
+    // Increment OCC version for commit
+    data._version = baseVersion + 1;
     const json = JSON.stringify(data, null, 2);
-    fs.writeFileSync(STORE_TEMP_FILE, json, 'utf-8');
-    fs.renameSync(STORE_TEMP_FILE, STORE_FILE);
+
+    // Unique temp file per process and write call to avoid temp file collision
+    const tempFile = path.join(
+      DATA_DIR,
+      `mipa_shared_store_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.tmp`
+    );
+
+    try {
+      fs.writeFileSync(tempFile, json, 'utf-8');
+
+      // CRITICAL TRANSACTION GUARD (OCC & Double-checked lock):
+      // Verify right before the atomic rename that:
+      // 1. Lock owner is STILL this process (lease has not expired or been stolen)
+      // 2. Disk data version has NOT changed since data was read
+      if (this.currentLockOwnerId) {
+        this.assertLockOwnership();
+      }
+
+      if (fs.existsSync(STORE_FILE)) {
+        try {
+          const currentDiskRaw = fs.readFileSync(STORE_FILE, 'utf-8');
+          const currentDiskData = JSON.parse(currentDiskRaw);
+          if (typeof currentDiskData._version === 'number' && currentDiskData._version !== baseVersion) {
+            throw new Error(
+              `[SharedStore] Giao dịch ghi bị hủy do xung đột phiên bản (OCC Conflict): phiên bản trên đĩa (${currentDiskData._version}) khác với phiên bản bắt đầu (${baseVersion}). Từ chối ghi đè.`
+            );
+          }
+        } catch (e: any) {
+          if (e.message?.includes('[SharedStore]')) {
+            throw e;
+          }
+        }
+      }
+
+      // Atomic commit
+      fs.renameSync(tempFile, STORE_FILE);
+    } catch (err) {
+      try {
+        if (fs.existsSync(tempFile)) {
+          fs.unlinkSync(tempFile);
+        }
+      } catch {}
+      throw err;
+    }
+  }
+
+  private assertLockOwnership(): void {
+    if (!this.currentLockOwnerId) return;
+    if (!fs.existsSync(OWNER_FILE)) {
+      throw new Error('[SharedStore] Giao dịch ghi bị hủy: Khóa ghi không còn tồn tại trên hệ thống tệp.');
+    }
+    const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
+    const owner: LockOwnerInfo = JSON.parse(rawOwner);
+    if (owner.ownerId !== this.currentLockOwnerId) {
+      throw new Error('[SharedStore] Giao dịch ghi bị hủy: Quyền sở hữu khóa đã bị thay đổi hoặc hết hạn. Từ chối ghi đè dữ liệu.');
+    }
+    if (Date.now() > owner.leaseExpiresAt) {
+      throw new Error('[SharedStore] Giao dịch ghi bị hủy: Khóa ghi đã hết hạn lease. Từ chối ghi đè dữ liệu.');
+    }
   }
 
   private ensureInitialized(): void {
@@ -200,6 +274,7 @@ class LeadHubSharedStore {
 
   private getInitialSeed(): StoreData {
     return {
+      _version: 1,
       services: [
         {
           id: 'srv-01',

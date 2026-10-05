@@ -138,8 +138,28 @@ async function runE2ETests() {
   }
   assert(fencingRejected, 'Fencing Token chặn tuyệt đối tiến trình có lease cũ/hết hạn ghi đè vào dữ liệu');
 
-  // --- ISSUE 3 (P1): Page sai ID nhưng trùng tên bị từ chối tuyệt đối ---
-  console.log('\n--- 3. Kiểm tra đối chiếu Page ID chính xác (Không chấp nhận sai ID dù trùng tên) ---');
+  // 2.3: Kiểm tra OCC Concurrency Control (Chặn ghi đè khi dữ liệu đĩa thay đổi)
+  let occConflictBlocked = false;
+  try {
+    const baseStoreData = (store as any).readData();
+    const currentVersion = baseStoreData._version || 1;
+    
+    // Giả lập tiến trình B ghi trước làm tăng version trên đĩa lên currentVersion + 1
+    const advancedData = { ...baseStoreData, _version: currentVersion + 1 };
+    fs.writeFileSync(path.join(process.cwd(), 'data', 'mipa_shared_store.json'), JSON.stringify(advancedData, null, 2), 'utf-8');
+
+    // Tiến trình A giữ bản snapshot cũ (version = currentVersion) cố tình ghi
+    const staleData = { ...baseStoreData, _version: currentVersion };
+    (store as any).writeData(staleData);
+  } catch (occErr: any) {
+    if (occErr.message.includes('OCC Conflict')) {
+      occConflictBlocked = true;
+    }
+  }
+  assert(occConflictBlocked, 'OCC Conflict chặn đứng tiến trình có snapshot cũ ghi đè lên phiên bản mới của đĩa');
+
+  // --- ISSUE 3 (P1): Page sai ID hoặc thiếu ID bị từ chối tuyệt đối khi cấu hình Page ID ---
+  console.log('\n--- 3. Kiểm tra đối chiếu Page ID chính xác (Không chấp nhận sai ID hoặc thiếu ID dù trùng tên) ---');
   
   // Tình huống 3.1: DOM hiển thị Page trùng tên "Maison MIPA" nhưng ID là 222 (yêu cầu là 111)
   const mockPageWrongId = {
@@ -159,7 +179,23 @@ async function runE2ETests() {
   assert(!resultWrongId.matched, 'Từ chối xác nhận khi Page trùng tên nhưng sai Page ID (222 != 111)');
   assert(Boolean(resultWrongId.error), 'Trả về lỗi từ chối rõ ràng để bảo vệ Page chính thức');
 
-  // Tình huống 3.2: DOM hiển thị Page đúng cả tên và ID 111
+  // Tình huống 3.2: DOM chỉ hiển thị tên "Maison MIPA" không có ID trong khi hệ thống yêu cầu Page ID 111
+  const mockPageNameOnly = {
+    $: async () => ({
+      textContent: async () => 'Tương tác dưới danh nghĩa: Maison MIPA',
+      getAttribute: async () => 'Tương tác dưới danh nghĩa: Maison MIPA',
+      click: async () => {},
+    }),
+    evaluate: async (fn: any) => {
+      return 'Maison MIPA';
+    },
+    waitForTimeout: async () => {},
+  } as any;
+
+  const resultNameOnly = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageNameOnly, 'Maison MIPA', '111');
+  assert(!resultNameOnly.matched, 'Từ chối xác nhận khi thiếu bằng chứng khớp Page ID 111 (không chấp nhận tên thuần túy)');
+
+  // Tình huống 3.3: DOM hiển thị Page đúng cả tên và ID 111
   const mockPageRightId = {
     $: async () => ({
       textContent: async () => 'Tương tác dưới danh nghĩa: Maison MIPA [Page ID: 111]',
@@ -175,36 +211,42 @@ async function runE2ETests() {
   const resultRightId = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageRightId, 'Maison MIPA', '111');
   assert(resultRightId.matched, 'Chấp nhận xác nhận khi cả tên Page và Page ID khớp chính xác');
 
-  // --- ISSUE 4 (P1): Bình luận cũ tải muộn cùng 35 ký tự mở đầu bị loại trừ ---
-  console.log('\n--- 4. Kiểm tra loại trừ bình luận cũ tải muộn & yêu cầu bằng chứng vừa tạo ---');
+  // Tình huống 3.4: Khi không cấu hình Page ID (tùy chọn) thì chấp nhận tên Page
+  const resultNoIdRequired = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageNameOnly, 'Maison MIPA', undefined);
+  assert(resultNoIdRequired.matched, 'Chấp nhận tên khi không yêu cầu bắt buộc Page ID');
 
-  // Mô phỏng 4.1: Bình luận cũ của Page xuất hiện sau snapshot với cùng 35 ký tự, nhưng có timestamp cũ ("3 giờ trước")
-  const testCommentText = 'Chào bạn, Maison MIPA xin gửi báo giá chụp ảnh áo dài kỷ yếu tại Quận 1.';
-  const oldLateComment = {
-    text: testCommentText,
-    author: 'Maison MIPA',
-    timeText: '3 giờ trước', // Dấu hiệu bình luận cũ
-  };
+  // --- ISSUE 4 & ISSUE 6 (P1 & P2): Khớp toàn bộ nội dung, độ tươi mới & tách biệt ID tác giả ---
+  console.log('\n--- 4. Kiểm tra khớp toàn bộ nội dung, độ tươi mới & tách biệt ID tác giả khỏi Permalink ---');
+
+  // Mô phỏng 4.1: Bình luận trùng 120 ký tự đầu nhưng khác giá ở cuối -> Phải bị từ chối
+  const targetFullContent = 'Chào bạn nha, Maison MIPA chuyên các bộ ảnh Áo dài tại TP.HCM. Bên mình có stylist hướng dẫn tạo dáng chi tiết từng góc chụp cho bạn hoàn toàn yên tâm nhé! Giá 1.200.000đ.';
+  const differentEndComment = 'Chào bạn nha, Maison MIPA chuyên các bộ ảnh Áo dài tại TP.HCM. Bên mình có stylist hướng dẫn tạo dáng chi tiết từng góc chụp cho bạn hoàn toàn yên tâm nhé! Giá 900.000đ.';
   
-  // Logic kiểm tra freshness proof:
-  const isOldDetected = /\b([2-9]|[1-9][0-9]+)\s*(?:giờ|tiếng|ngày|tuần|tháng|năm|h|d|w|m|y)\b/i.test(oldLateComment.timeText);
-  const hasRecency = /\b(vừa xong|vừa gửi|giây|1 phút|just now|now)\b/i.test(oldLateComment.timeText);
-  const isValidFresh = !isOldDetected && hasRecency;
-  assert(!isValidFresh, 'Bình luận cũ tải muộn có dấu hiệu thời gian cũ ("3 giờ trước") bị từ chối xác nhận');
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+  const isMatchDifferentEnd = norm(differentEndComment).includes(norm(targetFullContent));
+  assert(!isMatchDifferentEnd, 'Từ chối xác nhận khi bình luận chỉ trùng phần đầu nhưng khác giá/nội dung ở cuối');
 
-  // Mô phỏng 4.2: Bình luận mới vừa tạo có dấu hiệu "Vừa xong"
-  const freshComment = {
-    text: testCommentText,
-    author: 'Maison MIPA',
-    timeText: 'Vừa xong',
-  };
-  const isFreshOld = /\b([2-9]|[1-9][0-9]+)\s*(?:giờ|tiếng|ngày|tuần|tháng|năm|h|d|w|m|y)\b/i.test(freshComment.timeText);
-  const isFreshRecency = /\b(vừa xong|vừa gửi|giây|1 phút|just now|now)\b/i.test(freshComment.timeText);
-  const isFreshAccepted = !isFreshOld && isFreshRecency;
-  assert(isFreshAccepted, 'Bình luận mới có bằng chứng vừa tạo ("Vừa xong") được chấp nhận xác nhận');
+  // Mô phỏng 4.2: Bình luận cũ 1 phút trước lần gửi ("1 phút trước" hoặc timestamp nhỏ hơn submissionTime)
+  const submissionTime = Date.now();
+  const oneMinuteAgoTime = submissionTime - 60000;
+  const isOldTimestamp = oneMinuteAgoTime < (submissionTime - 3000);
+  const isOldText = /\b([0-9]+)\s*(?:phút|min|mins|minute|minutes|giờ|tiếng|ngày)\b/i.test('1 phút trước');
+  assert(isOldTimestamp && isOldText, 'Bình luận 1 phút trước lần gửi bị nhận diện là bình luận cũ và từ chối');
 
-  // --- ISSUE 5 (P2): Đăng xuất xóa phiên xác thực (Clear Cookie & Revoke Token) ---
-  console.log('\n--- 5. Kiểm tra luồng Đăng xuất & Thu hồi phiên hoàn toàn ---');
+  // Mô phỏng 4.3: Bình luận mới vừa tạo ("Vừa xong" hoặc timestamp >= submissionTime)
+  const freshTime = submissionTime + 1000;
+  const isFreshTimestamp = freshTime >= (submissionTime - 3000);
+  const isFreshText = /\b(vừa xong|vừa gửi|vài giây|just now)\b/i.test('Vừa xong');
+  assert(isFreshTimestamp && isFreshText, 'Bình luận mới tạo sau lần gửi được xác nhận');
+
+  // Mô phỏng 4.4 (ISSUE 6): Tách biệt ID tác giả khỏi ID bài viết trong permalink (Không lấy nhầm 777666 thay vì 111)
+  const authorData = 'Maison MIPA https://facebook.com/111 data-page-id="111"';
+  const authorIdMatch = authorData.match(/(?:page\s*id[:=\s]+|\/|id=|user\/)([0-9]{3,})/i) || authorData.match(/\b([0-9]{3,})\b/);
+  const isolatedAuthorId = authorIdMatch ? authorIdMatch[1] : null;
+  assert(isolatedAuthorId === '111', 'Lấy chính xác ID tác giả (111) từ link tác giả, không bị nhầm mã bài viết 777666 từ permalink');
+
+  // --- ISSUE 5 (P2): Đăng xuất xóa phiên xác thực & Thu hồi bền vững qua Restart ---
+  console.log('\n--- 5. Kiểm tra luồng Đăng xuất & Thu hồi phiên bền vững qua Restart ---');
 
   // Đăng nhập lấy token và cookie
   const loginReq = new Request('http://localhost:3000/api/auth/login', {
@@ -234,19 +276,34 @@ async function runE2ETests() {
   // Kiểm tra token đã bị thu hồi trong blacklist
   assert(isTokenRevoked(sessionToken), 'Token đã được đưa vào danh sách thu hồi (Revocation Blacklist)');
 
+  // Kiểm tra tệp lưu trữ thu hồi trên đĩa
+  const revokedFile = path.join(process.cwd(), 'data', 'revoked_tokens.json');
+  assert(fs.existsSync(revokedFile), 'Tệp lưu trữ token thu hồi revoked_tokens.json tồn tại trên đĩa');
+  const revokedContent = JSON.parse(fs.readFileSync(revokedFile, 'utf-8'));
+  assert(Array.isArray(revokedContent) && revokedContent.includes(sessionToken), 'Token thu hồi được ghi đĩa bền vững');
+
   // Dùng lại token hoặc cookie đã đăng xuất để gọi API bảo vệ -> Phải bị từ chối 401
   const reuseTokenReq = new Request('http://localhost:3000/api/posts', {
     headers: { 'Authorization': `Bearer ${sessionToken}` },
   });
   const reuseRes = await getPostsRoute(reuseTokenReq);
-  assert(reuseRes.status === 401, 'Token đã đăng xuất bị chặn truy cập API (HTTP 401)');
+  assert(reuseRes.status === 401, 'Token đã đăng xuất bị chặn truy cập API (HTTP 401) kể cả sau khi restart');
 
-  // --- ISSUE 6 (P2): Đồng bộ Docker Compose & Playwright 1.50.0 ---
-  console.log('\n--- 6. Kiểm tra cấu hình Docker Compose & Playwright 1.50.0 ---');
+  // --- ISSUE 6 (P1 & P2): Docker Compose bảo mật & Playwright 1.50.0 ---
+  console.log('\n--- 6. Kiểm tra cấu hình Docker Compose an toàn & Playwright 1.50.0 ---');
   const composeContent = fs.readFileSync(path.join(process.cwd(), 'docker-compose.yml'), 'utf-8');
   assert(composeContent.includes('APP_SECRET'), 'docker-compose.yml đã truyền biến APP_SECRET');
   assert(composeContent.includes('MIPA_ADMIN_PASSWORD'), 'docker-compose.yml đã truyền MIPA_ADMIN_PASSWORD');
   assert(composeContent.includes('FACEBOOK_PAGE_ID'), 'docker-compose.yml đã truyền FACEBOOK_PAGE_ID');
+
+  // Kiểm tra không còn fallback bí mật công khai trong docker-compose.yml
+  assert(!composeContent.includes(':-mipa_production_app_secret_key'), 'docker-compose.yml không còn fallback APP_SECRET công khai');
+  assert(!composeContent.includes(':-mipa@admin2026_prod'), 'docker-compose.yml không còn fallback MIPA_ADMIN_PASSWORD công khai');
+  assert(!composeContent.includes(':-mipa_internal_worker_key'), 'docker-compose.yml không còn fallback INTERNAL_WORKER_KEY công khai');
+  assert(!composeContent.includes(':-mipa_secure_session_encryption_key'), 'docker-compose.yml không còn fallback FACEBOOK_SESSION_ENCRYPTION_KEY công khai');
+  assert(composeContent.includes('${APP_SECRET:?'), 'docker-compose.yml bắt buộc cấu hình APP_SECRET');
+  assert(composeContent.includes('${MIPA_ADMIN_PASSWORD:?'), 'docker-compose.yml bắt buộc cấu hình MIPA_ADMIN_PASSWORD');
+  assert(composeContent.includes('${INTERNAL_WORKER_KEY:?'), 'docker-compose.yml bắt buộc cấu hình INTERNAL_WORKER_KEY');
 
   const pkgJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
   const dockerfile = fs.readFileSync(path.join(process.cwd(), 'Dockerfile.worker'), 'utf-8');

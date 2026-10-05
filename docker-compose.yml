@@ -50,14 +50,14 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://mipa_admin:mipa_secure_password_2026!@postgres:5432/mipa_lead_hub
       - NEXT_PUBLIC_APP_NAME=Maison MIPA Lead Hub
-      - APP_SECRET=${APP_SECRET:-mipa_production_app_secret_key_2026}
-      - INTERNAL_WORKER_KEY=${INTERNAL_WORKER_KEY:-mipa_internal_worker_key_2026_super_secure}
-      - MIPA_ADMIN_PASSWORD=${MIPA_ADMIN_PASSWORD:-mipa@admin2026_prod}
-      - MIPA_MARKETING_PASSWORD=${MIPA_MARKETING_PASSWORD:-mipa@mkt2026_prod}
-      - MIPA_CSKH_PASSWORD=${MIPA_CSKH_PASSWORD:-mipa@cskh2026_prod}
+      - APP_SECRET=${APP_SECRET:?APP_SECRET is required}
+      - INTERNAL_WORKER_KEY=${INTERNAL_WORKER_KEY:?INTERNAL_WORKER_KEY is required}
+      - MIPA_ADMIN_PASSWORD=${MIPA_ADMIN_PASSWORD:?MIPA_ADMIN_PASSWORD is required}
+      - MIPA_MARKETING_PASSWORD=${MIPA_MARKETING_PASSWORD:?MIPA_MARKETING_PASSWORD is required}
+      - MIPA_CSKH_PASSWORD=${MIPA_CSKH_PASSWORD:?MIPA_CSKH_PASSWORD is required}
       - FACEBOOK_PAGE_NAME=${FACEBOOK_PAGE_NAME:-Maison MIPA}
-      - FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID:-100083281234567}
-      - FACEBOOK_SESSION_ENCRYPTION_KEY=${FACEBOOK_SESSION_ENCRYPTION_KEY:-mipa_secure_session_encryption_key_2026}
+      - FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID:-}
+      - FACEBOOK_SESSION_ENCRYPTION_KEY=${FACEBOOK_SESSION_ENCRYPTION_KEY:?FACEBOOK_SESSION_ENCRYPTION_KEY is required}
     volumes:
       # CRITICAL: Mount shared data folder so web and worker share exact persistent state & sessions
       - shared_data:/app/data
@@ -80,11 +80,11 @@ services:
       - DATABASE_URL=postgresql://mipa_admin:mipa_secure_password_2026!@postgres:5432/mipa_lead_hub
       - PLAYWRIGHT_HEADLESS=true
       - WORKER_POLL_INTERVAL_DEFAULT=150
-      - APP_SECRET=${APP_SECRET:-mipa_production_app_secret_key_2026}
-      - INTERNAL_WORKER_KEY=${INTERNAL_WORKER_KEY:-mipa_internal_worker_key_2026_super_secure}
+      - APP_SECRET=${APP_SECRET:?APP_SECRET is required}
+      - INTERNAL_WORKER_KEY=${INTERNAL_WORKER_KEY:?INTERNAL_WORKER_KEY is required}
       - FACEBOOK_PAGE_NAME=${FACEBOOK_PAGE_NAME:-Maison MIPA}
-      - FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID:-100083281234567}
-      - FACEBOOK_SESSION_ENCRYPTION_KEY=${FACEBOOK_SESSION_ENCRYPTION_KEY:-mipa_secure_session_encryption_key_2026}
+      - FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID:-}
+      - FACEBOOK_SESSION_ENCRYPTION_KEY=${FACEBOOK_SESSION_ENCRYPTION_KEY:?FACEBOOK_SESSION_ENCRYPTION_KEY is required}
     volumes:
       # CRITICAL: Mount exact same shared volume for data, groups, posts, and auth cookies
       - shared_data:/app/data
