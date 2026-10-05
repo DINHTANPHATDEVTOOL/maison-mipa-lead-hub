@@ -133,23 +133,33 @@ export class FacebookCommentDispatcher {
       await page.waitForTimeout(600);
       await page.keyboard.type(params.commentContent, { delay: 40 });
       await page.waitForTimeout(800);
+      const submissionTimestamp = Date.now();
       await page.keyboard.press('Enter');
 
-      // STEP 4: STRICT DOM CONFIRMATION OF NEW COMMENT ONLY
+      // STEP 4: STRICT DOM CONFIRMATION OF FRESH NEW COMMENT ONLY
       // Look specifically inside comment containers for the newly submitted comment,
-      // strictly ignoring ANY pre-existing comment that was present prior to Enter.
-      const snippetToSearch = params.commentContent.slice(0, 35);
+      // strictly ignoring ANY pre-existing comment and requiring verified recency proof (bằng chứng vừa tạo).
       const startTime = Date.now();
-      let confirmedComment: { found: boolean; commentId?: string; commentPermalink?: string; authorMatches?: boolean } = { found: false };
+      let confirmedComment: { 
+        found: boolean; 
+        commentId?: string; 
+        commentPermalink?: string; 
+        authorMatches?: boolean;
+        isFresh?: boolean;
+        isContentFullMatch?: boolean;
+      } = { found: false };
 
       while (Date.now() - startTime < 16000) {
         await page.waitForTimeout(1500);
 
-        confirmedComment = await page.evaluate(({ snippet, targetIdentity, preExistingList }) => {
+        confirmedComment = await page.evaluate(({ fullContent, targetIdentity, targetPageId, preExistingList, submissionTime }) => {
           const preSet = new Set(preExistingList);
           const commentElements = document.querySelectorAll(
             'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
           );
+
+          const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+          const cleanTargetContent = norm(fullContent);
 
           for (const el of Array.from(commentElements)) {
             const permalinkAnchor = el.querySelector('a[href*="comment_id="]') as HTMLAnchorElement | null;
@@ -165,8 +175,9 @@ export class FacebookCommentDispatcher {
             const authorEl = el.querySelector('a[role="link"] span, h3, h4, span.x193iq5w');
             const authorText = (authorEl?.textContent || '').trim();
             const text = (el.textContent || '').trim();
+            const cleanText = norm(text);
 
-            // Ignore if this comment existed before our submission!
+            // 1. Snapshot filter: Ignore if this comment existed before our submission!
             if (commentId && preSet.has(`id:${commentId}`)) {
               continue;
             }
@@ -174,28 +185,95 @@ export class FacebookCommentDispatcher {
               continue;
             }
 
-            // Only check newly appeared comments
-            if (text.includes(snippet)) {
-              const authorMatches = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
-              return {
-                found: true,
-                commentId,
-                commentPermalink,
-                authorMatches,
-              };
+            // 2. Full Content verification (must match full content, not just a 35-character prefix)
+            const isContentFullMatch = cleanText.includes(cleanTargetContent) || 
+              (cleanTargetContent.length > 20 && cleanText.includes(cleanTargetContent.slice(0, Math.min(cleanTargetContent.length, 120))));
+            if (!isContentFullMatch) {
+              continue;
             }
+
+            // 3. Author / Page ID verification
+            const authorMatchesName = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
+            let authorMatchesId = true;
+            if (targetPageId) {
+              const anchorHref = permalinkAnchor?.href || '';
+              const authorAnchor = el.querySelector('a[role="link"], a[href*="facebook.com"]') as HTMLAnchorElement | null;
+              const authorHref = authorAnchor?.href || '';
+              const combinedVoiceInfo = `${authorText} ${anchorHref} ${authorHref}`;
+              const idMatch = combinedVoiceInfo.match(/(?:page\s*id[:=\s]+|\/|id=)([0-9]{3,})/i) || combinedVoiceInfo.match(/\b([0-9]{3,})\b/);
+              if (idMatch && idMatch[1] !== targetPageId) {
+                authorMatchesId = false; // Conflicting Page ID!
+              } else if (combinedVoiceInfo.includes(targetPageId)) {
+                authorMatchesId = true;
+              } else if (!authorMatchesName) {
+                authorMatchesId = false;
+              }
+            }
+
+            const authorMatches = authorMatchesName && authorMatchesId;
+            if (!authorMatches) {
+              continue;
+            }
+
+            // 4. Freshness verification: Bằng chứng bình luận vừa được tạo
+            // Check recency indicators vs old timestamp indicators
+            const timeEl = el.querySelector('abbr, time, span[id*="timestamp"], a[href*="comment_id="] span');
+            const timeText = (timeEl?.textContent || el.textContent || '').toLowerCase();
+
+            // Indicators that a comment is OLD (hours, days, weeks, months, years ago)
+            const isOldComment = /\b([2-9]|[1-9][0-9]+)\s*(?:giờ|tiếng|ngày|tuần|tháng|năm|hours?|days?|weeks?|months?|years?|h|d|w|m|y)\b/i.test(timeText) ||
+                                 /\b(hôm qua|yesterday|thứ\s+[hai|ba|tư|năm|sáu|bảy|nhật]|tháng\s+[0-9]+)\b/i.test(timeText);
+
+            // Freshness evidence: "vừa xong", "vừa gửi", "giây", "1 phút", "just now", "now",
+            // OR time attribute created within 3 minutes of submission
+            let hasFreshnessProof = false;
+            const recencyMatch = /\b(vừa xong|vừa gửi|giây|vài giây|1 phút|just now|seconds? ago|few seconds|1m|now)\b/i.test(timeText);
+            if (recencyMatch) {
+              hasFreshnessProof = true;
+            }
+
+            const timeTag = el.querySelector('time') as HTMLTimeElement | null;
+            if (timeTag) {
+              const dt = timeTag.getAttribute('datetime');
+              if (dt) {
+                const parsed = Date.parse(dt);
+                if (!isNaN(parsed) && Math.abs(parsed - submissionTime) < 180000) {
+                  hasFreshnessProof = true;
+                }
+              }
+            }
+
+            // If it is explicitly an old comment or lacks freshness proof, DO NOT confirm!
+            if (isOldComment || !hasFreshnessProof) {
+              continue;
+            }
+
+            return {
+              found: true,
+              commentId,
+              commentPermalink,
+              authorMatches: true,
+              isFresh: true,
+              isContentFullMatch: true,
+            };
           }
 
-          return { found: false, authorMatches: false };
-        }, { snippet: snippetToSearch, targetIdentity: targetPageName, preExistingList: preExistingComments });
+          return { found: false, authorMatches: false, isFresh: false };
+        }, { 
+          fullContent: params.commentContent, 
+          targetIdentity: targetPageName, 
+          targetPageId: params.pageId, 
+          preExistingList: preExistingComments,
+          submissionTime: submissionTimestamp
+        });
 
-        if (confirmedComment.found && confirmedComment.authorMatches) {
+        if (confirmedComment.found && confirmedComment.authorMatches && confirmedComment.isFresh) {
           break;
         }
       }
 
-      // CRITICAL FIX: Only confirm if BOTH comment text was found AND author matched our Page!
-      if (confirmedComment.found && confirmedComment.authorMatches) {
+      // CRITICAL FIX: Only confirm if ALL conditions met: found, full content matched, author/Page ID matched, AND freshness verified!
+      if (confirmedComment.found && confirmedComment.authorMatches && confirmedComment.isFresh) {
         const finalPermalink = confirmedComment.commentPermalink ||
           (confirmedComment.commentId ? `${params.postUrl}?comment_id=${confirmedComment.commentId}` : params.postUrl);
 
@@ -205,11 +283,11 @@ export class FacebookCommentDispatcher {
           permalink: finalPermalink,
         };
       } else {
-        // Did not confirm presence inside comments list with matching author within timeout
+        // Did not confirm presence inside comments list with matching author & freshness proof
         // Mark UNCERTAIN_FAILED to protect against duplicate posting!
-        const reason = confirmedComment.found && !confirmedComment.authorMatches
-          ? `Bình luận tương tự được phát hiện nhưng tác giả không khớp Page "${targetPageName}". Không xác nhận thành công để tránh nhầm lẫn với bình luận của người khác.`
-          : `Đã nhấn phím Enter gửi bình luận nhưng sau 16 giây chưa thấy bài xuất hiện dưới tên Page "${targetPageName}". Đánh dấu "Chưa xác định kết quả" để chống gửi lặp.`;
+        const reason = confirmedComment.found && !confirmedComment.isFresh
+          ? `Bình luận tương tự được phát hiện nhưng mang dấu hiệu bình luận cũ (không có bằng chứng vừa tạo). Đặt trạng thái chưa xác định để chống gửi trùng lặp.`
+          : `Đã nhấn phím Enter gửi bình luận nhưng sau 16 giây chưa thấy bài mới xuất hiện dưới tên Page "${targetPageName}" kèm bằng chứng vừa tạo. Đánh dấu "Chưa xác định kết quả" để chống gửi lặp.`;
 
         return {
           status: 'uncertain_failed',
@@ -272,9 +350,28 @@ export class FacebookCommentDispatcher {
         if (!voice) return false;
         const vLower = voice.toLowerCase();
         const tLower = targetIdentity.toLowerCase();
-        if (vLower.includes(tLower)) return true;
-        if (targetPageId && voice.includes(targetPageId)) return true;
-        return false;
+
+        // 1. If targetPageId is specified, check ID strictly!
+        if (targetPageId) {
+          // Check if voice contains ANY numeric ID (e.g. Page ID: 222, or /222, or [222])
+          const anyIdMatch = voice.match(/(?:page\s*id[:=\s]+|\/|data-page-id="|id=)([0-9]{3,})/i) ||
+                             voice.match(/\b([0-9]{3,})\b/);
+          if (anyIdMatch && anyIdMatch[1] !== targetPageId) {
+            // Conflicting Page ID detected!
+            return false;
+          }
+          // Must explicitly include the required targetPageId
+          if (voice.includes(targetPageId)) {
+            return true;
+          }
+          // If no numbers/IDs exist in voice string, check name ONLY if no conflicting ID was detected
+          if (!anyIdMatch && vLower.includes(tLower)) {
+            return true;
+          }
+          return false;
+        }
+
+        return vLower.includes(tLower);
       };
 
       // 1. Check current voice before touching switcher
@@ -310,9 +407,21 @@ export class FacebookCommentDispatcher {
         const targetOption = options.find(o => {
           const text = (o.textContent || '').toLowerCase();
           const targetLower = target.toLowerCase();
-          if (text.includes(targetLower)) return true;
-          if (pageId && (o.getAttribute('data-page-id') === pageId || text.includes(pageId))) return true;
-          return false;
+          const elPageId = o.getAttribute('data-page-id') || o.getAttribute('data-id') || '';
+
+          if (pageId) {
+            if (elPageId) {
+              return elPageId === pageId;
+            }
+            const idMatch = text.match(/(?:page\s*id[:=\s]+|\/)([0-9]{3,})/i) || text.match(/\b([0-9]{3,})\b/);
+            if (idMatch) {
+              return idMatch[1] === pageId;
+            }
+            // If option text has pageId
+            return text.includes(pageId);
+          }
+
+          return text.includes(targetLower);
         });
         if (targetOption) {
           (targetOption as HTMLElement).click();

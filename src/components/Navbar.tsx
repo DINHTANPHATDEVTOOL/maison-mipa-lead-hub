@@ -89,13 +89,26 @@ export default function Navbar() {
     setLoginError(null);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('mipa_token');
-    localStorage.removeItem('mipa_role');
-    setIsAuthenticated(false);
-    setRole(null);
-    setUserName('');
-    window.location.reload();
+  const handleLogout = async () => {
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('mipa_token') : null;
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      await fetch('/api/auth/logout', { method: 'POST', headers });
+    } catch (e) {
+      console.error('Logout API call error:', e);
+    } finally {
+      localStorage.removeItem('mipa_token');
+      localStorage.removeItem('mipa_role');
+      if (typeof document !== 'undefined') {
+        document.cookie = 'mipa_auth_token=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+      }
+      setIsAuthenticated(false);
+      setRole(null);
+      setUserName('');
+      window.location.reload();
+    }
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {

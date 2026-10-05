@@ -44,6 +44,20 @@ const RUNTIME_APP_SECRET = process.env.APP_SECRET?.trim() || crypto.randomBytes(
 // MUST be explicitly configured with at least 16 characters. NO public fallback!
 const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY?.trim() || null;
 
+// Revoked token blacklist (in-memory per runtime, covers logout revocation)
+const REVOKED_TOKENS = new Set<string>();
+
+export function revokeToken(token: string): void {
+  if (token && typeof token === 'string') {
+    REVOKED_TOKENS.add(token.trim());
+  }
+}
+
+export function isTokenRevoked(token: string): boolean {
+  if (!token || typeof token !== 'string') return true;
+  return REVOKED_TOKENS.has(token.trim());
+}
+
 /**
  * Generate a cryptographically signed HMAC token for an authenticated user.
  * Format: base64url(userId:role:issuedAt:hmacSignature)
@@ -60,6 +74,10 @@ export function issueSignedToken(userId: string, role: UserRole): string {
  */
 export function verifySignedToken(tokenString: string): { valid: boolean; user?: AuthUser; error?: string } {
   try {
+    if (isTokenRevoked(tokenString)) {
+      return { valid: false, error: 'Phiên làm việc đã bị thu hồi (đã đăng xuất). Vui lòng đăng nhập lại.' };
+    }
+
     const decoded = Buffer.from(tokenString, 'base64url').toString('utf-8');
     const parts = decoded.split(':');
     if (parts.length !== 4) {

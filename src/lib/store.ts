@@ -62,76 +62,55 @@ class LeadHubSharedStore {
     return g.__mipaSharedStoreInstance;
   }
 
-  // --- Concurrency Control (Owner-based Lock with PID Heartbeat) ---
-  private withFileLock<T>(fn: () => T, timeoutMs: number = 30000): T {
+  private currentLockOwnerId: string | null = null;
+
+  // --- Concurrency Control (Fencing Token Lock with Cross-Container Protection) ---
+  private withFileLock<T>(fn: () => T, timeoutMs: number = 45000): T {
     const start = Date.now();
     const ownerId = crypto.randomUUID();
     let acquired = false;
-    let heartbeatTimer: NodeJS.Timeout | null = null;
 
     while (!acquired) {
       try {
         fs.mkdirSync(LOCK_DIR);
         acquired = true;
 
-        // Write lock owner record
+        // Write lock owner record with generous lease (120s)
         const ownerInfo: LockOwnerInfo = {
           ownerId,
           pid: process.pid,
           acquiredAt: Date.now(),
           lastHeartbeat: Date.now(),
-          leaseExpiresAt: Date.now() + 10000,
+          leaseExpiresAt: Date.now() + 120000,
         };
         fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
-
-        // Start heartbeat to continuously renew lease while working
-        heartbeatTimer = setInterval(() => {
-          try {
-            if (fs.existsSync(OWNER_FILE)) {
-              ownerInfo.lastHeartbeat = Date.now();
-              ownerInfo.leaseExpiresAt = Date.now() + 10000;
-              fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
-            }
-          } catch {
-            // Heartbeat write retry
-          }
-        }, 800);
+        this.currentLockOwnerId = ownerId;
 
       } catch (err: any) {
         if (err.code === 'EEXIST') {
-          // Check who owns the lock
+          // Lock is held by another process or container
           try {
             if (fs.existsSync(OWNER_FILE)) {
               const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
               const ownerData: LockOwnerInfo = JSON.parse(rawOwner);
 
-              // Check if owner process PID is still running
-              let isPidAlive = false;
-              try {
-                process.kill(ownerData.pid, 0);
-                isPidAlive = true;
-              } catch (e: any) {
-                isPidAlive = e.code !== 'ESRCH';
-              }
-
-              // ONLY clean up if the process is DEAD or lease has been dead for >15s without any heartbeat
-              if (!isPidAlive || (Date.now() > ownerData.leaseExpiresAt + 15000)) {
-                console.warn(`[SharedStore] Phát hiện khóa cũ từ tiến trình đã dừng (PID ${ownerData.pid}). Thu hồi khóa.`);
+              // ONLY clean up if the lock is genuinely stale (>120s abandoned by crashed process)
+              if (Date.now() > ownerData.leaseExpiresAt) {
+                console.warn(`[SharedStore] Phát hiện khóa cũ đã quá hạn 120s. Thu hồi khóa.`);
                 try { fs.unlinkSync(OWNER_FILE); } catch {}
                 try { fs.rmdirSync(LOCK_DIR); } catch {}
                 continue;
               }
 
-              // Owner is ALIVE and actively renewing lease:
-              // DO NOT STEAL THE LOCK! Check timeout and wait.
+              // Lock is actively held: DO NOT STEAL! Wait patiently.
               if (Date.now() - start > timeoutMs) {
-                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms. Khóa đang được giữ bởi tiến trình PID ${ownerData.pid}.`);
+                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms. Khóa đang được giữ bởi tiến trình khác.`);
               }
 
             } else {
-              // Lock directory exists but owner.json not yet written or stale
+              // Lock directory exists but owner.json not yet written or stale directory
               const stats = fs.statSync(LOCK_DIR);
-              if (Date.now() - stats.mtimeMs > 15000) {
+              if (Date.now() - stats.mtimeMs > 120000) {
                 try { fs.rmdirSync(LOCK_DIR); } catch {}
                 continue;
               }
@@ -144,7 +123,6 @@ class LeadHubSharedStore {
             if (inspectErr.message.includes('Timeout')) {
               throw inspectErr;
             }
-            // Transient read/check error, retry loop
           }
 
           // Backoff delay
@@ -164,9 +142,6 @@ class LeadHubSharedStore {
     try {
       return fn();
     } finally {
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
       try {
         if (fs.existsSync(OWNER_FILE)) {
           const raw = fs.readFileSync(OWNER_FILE, 'utf-8');
@@ -180,11 +155,15 @@ class LeadHubSharedStore {
         }
       } catch {
         // ignore lock release errors
+      } finally {
+        if (this.currentLockOwnerId === ownerId) {
+          this.currentLockOwnerId = null;
+        }
       }
     }
   }
 
-  // --- Persistence Layer (Atomic File Sync with Strict Error Propagation) ---
+  // --- Persistence Layer (Atomic File Sync with Fencing Token & Error Propagation) ---
   private readData(): StoreData {
     if (fs.existsSync(STORE_FILE)) {
       const raw = fs.readFileSync(STORE_FILE, 'utf-8');
@@ -194,6 +173,18 @@ class LeadHubSharedStore {
   }
 
   private writeData(data: StoreData): void {
+    // FENCING TOKEN CHECK: Never allow writing if lock was lost or stolen!
+    if (this.currentLockOwnerId) {
+      if (!fs.existsSync(OWNER_FILE)) {
+        throw new Error('[SharedStore] Giao dịch ghi bị hủy: Khóa ghi không còn tồn tại trên hệ thống tệp.');
+      }
+      const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
+      const owner = JSON.parse(rawOwner);
+      if (owner.ownerId !== this.currentLockOwnerId) {
+        throw new Error('[SharedStore] Giao dịch ghi bị hủy: Quyền sở hữu khóa đã bị thay đổi hoặc hết hạn. Từ chối ghi đè dữ liệu.');
+      }
+    }
+
     // Write to temp file then atomic rename.
     // Throws immediately on disk I/O errors (EIO, ENOSPC, EACCES) to prevent false successes!
     const json = JSON.stringify(data, null, 2);
@@ -645,12 +636,16 @@ class LeadHubSharedStore {
 
     const targetPost = (preCheck as any).postToDispatch as FacebookPost;
 
-    // Call real Playwright comment dispatcher
+    // Call real Playwright comment dispatcher with configured Page ID and Name
+    const configuredPageId = process.env.FACEBOOK_PAGE_ID?.trim() || undefined;
+    const configuredPageName = process.env.FACEBOOK_PAGE_NAME?.trim() || 'Maison MIPA';
+
     const dispatchResult = await commentDispatcher.dispatchComment({
       postId: targetPost.id,
       postUrl: targetPost.post_url,
       commentContent,
-      pageIdentity: 'Maison MIPA',
+      pageIdentity: configuredPageName,
+      pageId: configuredPageId,
     });
 
     // Phase 2: Lock and update final result
@@ -665,7 +660,7 @@ class LeadHubSharedStore {
           post_id: postId,
           comment_facebook_id: dispatchResult.commentFacebookId,
           comment_permalink: dispatchResult.permalink,
-          page_identity: 'Maison MIPA Photography',
+          page_identity: configuredPageName,
           operator_name: operatorName,
           template_used_id: currentPost.classification?.suggested_template_id || 'custom',
           comment_content: commentContent,
