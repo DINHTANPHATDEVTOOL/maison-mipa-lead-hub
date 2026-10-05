@@ -21,9 +21,18 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_FILE = path.join(DATA_DIR, 'mipa_shared_store.json');
 const STORE_TEMP_FILE = path.join(DATA_DIR, 'mipa_shared_store.tmp');
 const LOCK_DIR = path.join(DATA_DIR, 'store.lock');
+const OWNER_FILE = path.join(LOCK_DIR, 'owner.json');
 
 function hashUrl(url: string): string {
   return crypto.createHash('sha256').update(url.trim().toLowerCase()).digest('hex');
+}
+
+interface LockOwnerInfo {
+  ownerId: string;
+  pid: number;
+  acquiredAt: number;
+  lastHeartbeat: number;
+  leaseExpiresAt: number;
 }
 
 interface StoreData {
@@ -53,42 +62,98 @@ class LeadHubSharedStore {
     return g.__mipaSharedStoreInstance;
   }
 
-  // --- Concurrency Control (Inter-process POSIX File Lock) ---
-  private withFileLock<T>(fn: () => T, timeoutMs: number = 8000): T {
+  // --- Concurrency Control (Owner-based Lock with PID Heartbeat) ---
+  private withFileLock<T>(fn: () => T, timeoutMs: number = 30000): T {
     const start = Date.now();
+    const ownerId = crypto.randomUUID();
     let acquired = false;
+    let heartbeatTimer: NodeJS.Timeout | null = null;
 
     while (!acquired) {
       try {
         fs.mkdirSync(LOCK_DIR);
         acquired = true;
-      } catch (err: any) {
-        if (err.code === 'EEXIST') {
-          // Check for stale lock (older than 10 seconds)
+
+        // Write lock owner record
+        const ownerInfo: LockOwnerInfo = {
+          ownerId,
+          pid: process.pid,
+          acquiredAt: Date.now(),
+          lastHeartbeat: Date.now(),
+          leaseExpiresAt: Date.now() + 10000,
+        };
+        fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
+
+        // Start heartbeat to continuously renew lease while working
+        heartbeatTimer = setInterval(() => {
           try {
-            const stats = fs.statSync(LOCK_DIR);
-            if (Date.now() - stats.mtimeMs > 10000) {
-              fs.rmdirSync(LOCK_DIR);
-              continue;
+            if (fs.existsSync(OWNER_FILE)) {
+              ownerInfo.lastHeartbeat = Date.now();
+              ownerInfo.leaseExpiresAt = Date.now() + 10000;
+              fs.writeFileSync(OWNER_FILE, JSON.stringify(ownerInfo));
             }
           } catch {
-            // lock may have been released between stat and rmdir
+            // Heartbeat write retry
+          }
+        }, 800);
+
+      } catch (err: any) {
+        if (err.code === 'EEXIST') {
+          // Check who owns the lock
+          try {
+            if (fs.existsSync(OWNER_FILE)) {
+              const rawOwner = fs.readFileSync(OWNER_FILE, 'utf-8');
+              const ownerData: LockOwnerInfo = JSON.parse(rawOwner);
+
+              // Check if owner process PID is still running
+              let isPidAlive = false;
+              try {
+                process.kill(ownerData.pid, 0);
+                isPidAlive = true;
+              } catch (e: any) {
+                isPidAlive = e.code !== 'ESRCH';
+              }
+
+              // ONLY clean up if the process is DEAD or lease has been dead for >15s without any heartbeat
+              if (!isPidAlive || (Date.now() > ownerData.leaseExpiresAt + 15000)) {
+                console.warn(`[SharedStore] Phát hiện khóa cũ từ tiến trình đã dừng (PID ${ownerData.pid}). Thu hồi khóa.`);
+                try { fs.unlinkSync(OWNER_FILE); } catch {}
+                try { fs.rmdirSync(LOCK_DIR); } catch {}
+                continue;
+              }
+
+              // Owner is ALIVE and actively renewing lease:
+              // DO NOT STEAL THE LOCK! Check timeout and wait.
+              if (Date.now() - start > timeoutMs) {
+                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms. Khóa đang được giữ bởi tiến trình PID ${ownerData.pid}.`);
+              }
+
+            } else {
+              // Lock directory exists but owner.json not yet written or stale
+              const stats = fs.statSync(LOCK_DIR);
+              if (Date.now() - stats.mtimeMs > 15000) {
+                try { fs.rmdirSync(LOCK_DIR); } catch {}
+                continue;
+              }
+
+              if (Date.now() - start > timeoutMs) {
+                throw new Error(`[SharedStore] Timeout chờ khóa tệp dữ liệu sau ${timeoutMs}ms.`);
+              }
+            }
+          } catch (inspectErr: any) {
+            if (inspectErr.message.includes('Timeout')) {
+              throw inspectErr;
+            }
+            // Transient read/check error, retry loop
           }
 
-          if (Date.now() - start > timeoutMs) {
-            console.warn(`[SharedStore] Timeout chờ khóa tệp dữ liệu (${timeoutMs}ms). Cưỡng chế mở khóa cũ.`);
-            try {
-              fs.rmdirSync(LOCK_DIR);
-            } catch {}
-          } else {
-            // Delay 15ms
-            const delayMs = 15;
-            try {
-              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
-            } catch {
-              const waitEnd = Date.now() + delayMs;
-              while (Date.now() < waitEnd) {}
-            }
+          // Backoff delay
+          const delayMs = 25;
+          try {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+          } catch {
+            const waitEnd = Date.now() + delayMs;
+            while (Date.now() < waitEnd) {}
           }
         } else {
           throw err;
@@ -99,37 +164,41 @@ class LeadHubSharedStore {
     try {
       return fn();
     } finally {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
       try {
-        if (fs.existsSync(LOCK_DIR)) {
+        if (fs.existsSync(OWNER_FILE)) {
+          const raw = fs.readFileSync(OWNER_FILE, 'utf-8');
+          const current = JSON.parse(raw);
+          if (current.ownerId === ownerId) {
+            fs.unlinkSync(OWNER_FILE);
+            fs.rmdirSync(LOCK_DIR);
+          }
+        } else if (fs.existsSync(LOCK_DIR)) {
           fs.rmdirSync(LOCK_DIR);
         }
       } catch {
-        // ignore lock release error
+        // ignore lock release errors
       }
     }
   }
 
-  // --- Persistence Layer (Atomic File Sync) ---
+  // --- Persistence Layer (Atomic File Sync with Strict Error Propagation) ---
   private readData(): StoreData {
-    try {
-      if (fs.existsSync(STORE_FILE)) {
-        const raw = fs.readFileSync(STORE_FILE, 'utf-8');
-        return JSON.parse(raw);
-      }
-    } catch (err) {
-      console.error('[SharedStore] Lỗi đọc file data:', err);
+    if (fs.existsSync(STORE_FILE)) {
+      const raw = fs.readFileSync(STORE_FILE, 'utf-8');
+      return JSON.parse(raw);
     }
     return this.getInitialSeed();
   }
 
   private writeData(data: StoreData): void {
-    try {
-      const json = JSON.stringify(data, null, 2);
-      fs.writeFileSync(STORE_TEMP_FILE, json, 'utf-8');
-      fs.renameSync(STORE_TEMP_FILE, STORE_FILE); // Atomic POSIX rename
-    } catch (err) {
-      console.error('[SharedStore] Lỗi ghi file data:', err);
-    }
+    // Write to temp file then atomic rename.
+    // Throws immediately on disk I/O errors (EIO, ENOSPC, EACCES) to prevent false successes!
+    const json = JSON.stringify(data, null, 2);
+    fs.writeFileSync(STORE_TEMP_FILE, json, 'utf-8');
+    fs.renameSync(STORE_TEMP_FILE, STORE_FILE);
   }
 
   private ensureInitialized(): void {
@@ -282,11 +351,11 @@ class LeadHubSharedStore {
       heartbeat: {
         worker_id: 'worker-ubuntu-central-01',
         worker_name: 'Maison MIPA Central Worker',
-        is_alive: false, // Calculated dynamically from worker ping
+        is_alive: false,
         facebook_auth_valid: authManager.hasStoredSession(),
         page_permission_valid: true,
         active_jobs_count: 0,
-        last_ping: null, // Strictly null until actual worker process pings
+        last_ping: null,
         operating_mode: 'manual_review',
       }
     };
@@ -359,9 +428,6 @@ class LeadHubSharedStore {
         .digest('hex');
 
       // Deduplication Check
-      // 1. Same Post ID -> definite duplicate
-      // 2. Same post URL hash with valid post ID -> definite duplicate
-      // 3. Fallback when post ID is absent: match author + content in same group
       const existing = storeData.posts.find(p => {
         if (finalPostId && p.facebook_post_id && p.facebook_post_id === finalPostId) {
           return true;
@@ -405,15 +471,6 @@ class LeadHubSharedStore {
         }
         return { post: existing, isNew: false };
       }
-
-      // Check if there is a similar content from the same author with different post ID (suspected cross-post / duplicate)
-      const isSuspectedDuplicate = storeData.posts.some(p => {
-        const pFingerprint = crypto
-          .createHash('sha256')
-          .update(`${p.author_name}:${p.content_raw.slice(0, 200)}`.toLowerCase())
-          .digest('hex');
-        return pFingerprint === contentFingerprint && p.facebook_post_id !== finalPostId;
-      });
 
       const newPost: FacebookPost = {
         id: `post-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -751,7 +808,6 @@ class LeadHubSharedStore {
     return this.withFileLock(() => {
       const storeData = this.readData();
       storeData.heartbeat.operating_mode = mode;
-      // Do NOT touch last_ping when changing operating mode!
       this.writeData(storeData);
       return storeData.heartbeat;
     });

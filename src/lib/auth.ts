@@ -9,58 +9,104 @@ export interface AuthUser {
   token: string;
 }
 
-// Configurable passwords with secure fallbacks (overridable via environment)
-const ADMIN_PASSWORD = process.env.MIPA_ADMIN_PASSWORD || 'mipa@admin2026';
-const MARKETING_PASSWORD = process.env.MIPA_MARKETING_PASSWORD || 'mipa@mkt2026';
-const CSKH_PASSWORD = process.env.MIPA_CSKH_PASSWORD || 'mipa@cskh2026';
-
-// Cryptographic hash helper
-function hashPassword(pass: string): string {
-  return crypto.createHash('sha256').update(pass).digest('hex');
-}
-
-function generateToken(email: string, pass: string): string {
-  return 'mipa_sec_' + crypto.createHash('sha256').update(`${email}:${pass}:${process.env.APP_SECRET || 'mipa-salt-2026'}`).digest('hex');
-}
-
-// Built-in initial staff accounts
+// Built-in staff accounts directory
 export const SYSTEM_STAFF_ACCOUNTS: Array<{
   id: string;
   name: string;
   email: string;
   role: UserRole;
-  passwordHash: string;
-  token: string;
 }> = [
   {
     id: 'user-admin-01',
     name: 'Đinh Tấn Phát (Quản Trị)',
     email: 'admin@maisonmipa.vn',
     role: 'admin',
-    passwordHash: hashPassword(ADMIN_PASSWORD),
-    token: generateToken('admin@maisonmipa.vn', ADMIN_PASSWORD),
   },
   {
     id: 'user-mkt-01',
     name: 'Trần Minh Thư (Marketing)',
     email: 'marketing@maisonmipa.vn',
     role: 'marketing',
-    passwordHash: hashPassword(MARKETING_PASSWORD),
-    token: generateToken('marketing@maisonmipa.vn', MARKETING_PASSWORD),
   },
   {
     id: 'user-cskh-01',
     name: 'Nguyễn Ngọc Lan (CSKH & Chốt Lịch)',
     email: 'cskh@maisonmipa.vn',
     role: 'cskh',
-    passwordHash: hashPassword(CSKH_PASSWORD),
-    token: generateToken('cskh@maisonmipa.vn', CSKH_PASSWORD),
   },
 ];
 
+// Ephemeral runtime secret if APP_SECRET environment variable is not provided.
+// This guarantees that external attackers CANNOT forge tokens by reading source code.
+const RUNTIME_APP_SECRET = process.env.APP_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+
 // Internal service key for background worker communication
-// MUST be explicitly provided via environment variable. NO insecure public fallback!
+// MUST be explicitly configured with at least 16 characters. NO public fallback!
 const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY?.trim() || null;
+
+/**
+ * Generate a cryptographically signed HMAC token for an authenticated user.
+ * Format: base64url(userId:role:issuedAt:hmacSignature)
+ */
+export function issueSignedToken(userId: string, role: UserRole): string {
+  const issuedAt = Date.now();
+  const payload = `${userId}:${role}:${issuedAt}`;
+  const sig = crypto.createHmac('sha256', RUNTIME_APP_SECRET).update(payload).digest('hex');
+  return Buffer.from(`${payload}:${sig}`).toString('base64url');
+}
+
+/**
+ * Verify and decode an HMAC-signed token
+ */
+export function verifySignedToken(tokenString: string): { valid: boolean; user?: AuthUser; error?: string } {
+  try {
+    const decoded = Buffer.from(tokenString, 'base64url').toString('utf-8');
+    const parts = decoded.split(':');
+    if (parts.length !== 4) {
+      return { valid: false, error: 'Mã xác thực không đúng định dạng.' };
+    }
+
+    const [userId, role, issuedAtStr, sig] = parts;
+    const issuedAt = parseInt(issuedAtStr, 10);
+    if (isNaN(issuedAt)) {
+      return { valid: false, error: 'Thời gian khởi tạo token không hợp lệ.' };
+    }
+
+    // Check expiration (7 days)
+    if (Date.now() - issuedAt > 7 * 86400 * 1000) {
+      return { valid: false, error: 'Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại.' };
+    }
+
+    // Verify HMAC signature using timing-safe comparison
+    const expectedPayload = `${userId}:${role}:${issuedAt}`;
+    const expectedSig = crypto.createHmac('sha256', RUNTIME_APP_SECRET).update(expectedPayload).digest('hex');
+
+    const sigBuf = Buffer.from(sig);
+    const expectedBuf = Buffer.from(expectedSig);
+
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return { valid: false, error: 'Chữ ký số của Token không hợp lệ. Từ chối xác thực.' };
+    }
+
+    const staff = SYSTEM_STAFF_ACCOUNTS.find(u => u.id === userId && u.role === role);
+    if (!staff) {
+      return { valid: false, error: 'Không tìm thấy người dùng khớp với mã xác thực.' };
+    }
+
+    return {
+      valid: true,
+      user: {
+        id: staff.id,
+        name: staff.name,
+        email: staff.email,
+        role: staff.role,
+        token: tokenString,
+      },
+    };
+  } catch (err: any) {
+    return { valid: false, error: 'Lỗi giải mã token: ' + err.message };
+  }
+}
 
 export interface VerifyAuthResult {
   success: boolean;
@@ -114,7 +160,7 @@ export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthR
     }
   }
 
-  // Fallback: development test token header
+  // Fallback: test token header
   if (!token) {
     token = req.headers.get('x-auth-token');
   }
@@ -127,22 +173,24 @@ export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthR
     };
   }
 
-  // 3. Find User by Token
-  const matchedUser = SYSTEM_STAFF_ACCOUNTS.find(u => u.token === token);
-  if (!matchedUser) {
+  // 3. Cryptographically verify signed token
+  const tokenVerify = verifySignedToken(token);
+  if (!tokenVerify.valid || !tokenVerify.user) {
     return {
       success: false,
-      error: 'Mã xác thực (Token) không hợp lệ hoặc đã hết hạn.',
+      error: tokenVerify.error || 'Mã xác thực (Token) không hợp lệ hoặc đã hết hạn.',
       status: 401,
     };
   }
 
+  const user = tokenVerify.user;
+
   // 4. Role Authorization Check
   if (allowedRoles && allowedRoles.length > 0) {
-    if (!allowedRoles.includes(matchedUser.role)) {
+    if (!allowedRoles.includes(user.role)) {
       return {
         success: false,
-        error: `Từ chối truy cập (403 Forbidden): Vai trò "${matchedUser.role}" không có quyền thực hiện thao tác này. Thao tác yêu cầu: [${allowedRoles.join(', ')}].`,
+        error: `Từ chối truy cập (403 Forbidden): Vai trò "${user.role}" không có quyền thực hiện thao tác này. Thao tác yêu cầu: [${allowedRoles.join(', ')}].`,
         status: 403,
       };
     }
@@ -150,19 +198,15 @@ export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthR
 
   return {
     success: true,
-    user: {
-      id: matchedUser.id,
-      name: matchedUser.name,
-      email: matchedUser.email,
-      role: matchedUser.role,
-      token: matchedUser.token,
-    },
+    user,
     status: 200,
   };
 }
 
 /**
- * Verify staff credentials for login
+ * Verify staff credentials for login.
+ * Strictly requires environment variables (MIPA_ADMIN_PASSWORD, MIPA_MARKETING_PASSWORD, MIPA_CSKH_PASSWORD).
+ * REJECTS login if password is not configured in environment. NO hardcoded public fallback!
  */
 export function verifyCredentials(credentials: { email?: string; role?: string; password?: string }): {
   user: AuthUser | null;
@@ -174,29 +218,51 @@ export function verifyCredentials(credentials: { email?: string; role?: string; 
     return { user: null, error: 'Mật khẩu là bắt buộc để đăng nhập.' };
   }
 
-  let account;
+  let staff;
   if (email) {
-    account = SYSTEM_STAFF_ACCOUNTS.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
+    staff = SYSTEM_STAFF_ACCOUNTS.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
   } else if (role) {
-    account = SYSTEM_STAFF_ACCOUNTS.find(u => u.role === role);
+    staff = SYSTEM_STAFF_ACCOUNTS.find(u => u.role === role);
   }
 
-  if (!account) {
+  if (!staff) {
     return { user: null, error: 'Tài khoản không tồn tại trên hệ thống Maison MIPA.' };
   }
 
-  const inputHash = hashPassword(password);
-  if (inputHash !== account.passwordHash) {
+  // Read password strictly from environment variable
+  let configuredPassword: string | undefined;
+  if (staff.role === 'admin') configuredPassword = process.env.MIPA_ADMIN_PASSWORD;
+  else if (staff.role === 'marketing') configuredPassword = process.env.MIPA_MARKETING_PASSWORD;
+  else if (staff.role === 'cskh') configuredPassword = process.env.MIPA_CSKH_PASSWORD;
+
+  if (!configuredPassword || configuredPassword.trim() === '') {
+    return {
+      user: null,
+      error: `Hệ thống chưa được cấu hình mật khẩu biến môi trường MIPA_${staff.role.toUpperCase()}_PASSWORD. Vui lòng thiết lập biến môi trường trước khi đăng nhập.`,
+    };
+  }
+
+  // Constant-time hash verification
+  const inputHash = crypto.createHash('sha256').update(password).digest('hex');
+  const targetHash = crypto.createHash('sha256').update(configuredPassword).digest('hex');
+
+  const inputBuf = Buffer.from(inputHash);
+  const targetBuf = Buffer.from(targetHash);
+
+  if (inputBuf.length !== targetBuf.length || !crypto.timingSafeEqual(inputBuf, targetBuf)) {
     return { user: null, error: 'Mật khẩu không chính xác.' };
   }
 
+  // Issue freshly signed HMAC token
+  const token = issueSignedToken(staff.id, staff.role);
+
   return {
     user: {
-      id: account.id,
-      name: account.name,
-      email: account.email,
-      role: account.role,
-      token: account.token,
+      id: staff.id,
+      name: staff.name,
+      email: staff.email,
+      role: staff.role,
+      token,
     },
   };
 }
@@ -220,4 +286,3 @@ export function checkRolePermission(req: Request, allowedRoles: UserRole[]): { a
     status: 200,
   };
 }
-

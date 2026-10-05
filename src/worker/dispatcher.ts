@@ -6,6 +6,7 @@ export interface DispatchCommentParams {
   postUrl: string;
   commentContent: string;
   pageIdentity?: string; // Default: 'Maison MIPA'
+  pageId?: string; // Facebook Page ID (e.g. '100083281234567')
   lookbackTimeoutMs?: number;
 }
 
@@ -83,7 +84,7 @@ export class FacebookCommentDispatcher {
       // STEP 1: Verify & Switch Identity to Page (Maison MIPA)
       const targetPageName = params.pageIdentity || 'Maison MIPA';
       console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${targetPageName}"`);
-      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName);
+      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName, params.pageId);
       if (!identityResult.matched) {
         return {
           status: 'rejected',
@@ -103,6 +104,30 @@ export class FacebookCommentDispatcher {
         };
       }
 
+      // STEP 2.5: Snapshot existing comments on the post BEFORE typing
+      // Collect existing comment IDs and unique content/author fingerprints to prevent false positives from pre-existing comments.
+      const preExistingComments = await page.evaluate(() => {
+        const commentElements = document.querySelectorAll(
+          'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
+        );
+        const set = new Set<string>();
+        for (let i = 0; i < commentElements.length; i++) {
+          const el = commentElements[i];
+          const permalinkAnchor = el.querySelector('a[href*="comment_id="]') as HTMLAnchorElement | null;
+          if (permalinkAnchor) {
+            const match = permalinkAnchor.href.match(/comment_id=([0-9]+)/);
+            if (match) set.add(`id:${match[1]}`);
+          }
+          const authorEl = el.querySelector('a[role="link"] span, h3, h4, span.x193iq5w');
+          const authorText = (authorEl?.textContent || '').trim();
+          const text = (el.textContent || '').trim();
+          if (text) {
+            set.add(`fp:${authorText}::${text.slice(0, 100)}`);
+          }
+        }
+        return Array.from(set);
+      });
+
       // STEP 3: Type with human-like cadence
       await commentInput.click();
       await page.waitForTimeout(600);
@@ -110,8 +135,9 @@ export class FacebookCommentDispatcher {
       await page.waitForTimeout(800);
       await page.keyboard.press('Enter');
 
-      // STEP 4: STRICT DOM CONFIRMATION
-      // Look specifically inside comment containers for the comment snippet and matching author.
+      // STEP 4: STRICT DOM CONFIRMATION OF NEW COMMENT ONLY
+      // Look specifically inside comment containers for the newly submitted comment,
+      // strictly ignoring ANY pre-existing comment that was present prior to Enter.
       const snippetToSearch = params.commentContent.slice(0, 35);
       const startTime = Date.now();
       let confirmedComment: { found: boolean; commentId?: string; commentPermalink?: string; authorMatches?: boolean } = { found: false };
@@ -119,31 +145,38 @@ export class FacebookCommentDispatcher {
       while (Date.now() - startTime < 16000) {
         await page.waitForTimeout(1500);
 
-        confirmedComment = await page.evaluate(({ snippet, targetIdentity }) => {
-          // Look in comment article elements
+        confirmedComment = await page.evaluate(({ snippet, targetIdentity, preExistingList }) => {
+          const preSet = new Set(preExistingList);
           const commentElements = document.querySelectorAll(
             'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
           );
 
           for (const el of Array.from(commentElements)) {
+            const permalinkAnchor = el.querySelector('a[href*="comment_id="]') as HTMLAnchorElement | null;
+            let commentId: string | undefined;
+            let commentPermalink: string | undefined;
+
+            if (permalinkAnchor) {
+              const match = permalinkAnchor.href.match(/comment_id=([0-9]+)/);
+              if (match) commentId = match[1];
+              commentPermalink = permalinkAnchor.href;
+            }
+
+            const authorEl = el.querySelector('a[role="link"] span, h3, h4, span.x193iq5w');
+            const authorText = (authorEl?.textContent || '').trim();
             const text = (el.textContent || '').trim();
+
+            // Ignore if this comment existed before our submission!
+            if (commentId && preSet.has(`id:${commentId}`)) {
+              continue;
+            }
+            if (preSet.has(`fp:${authorText}::${text.slice(0, 100)}`)) {
+              continue;
+            }
+
+            // Only check newly appeared comments
             if (text.includes(snippet)) {
-              // Check if author matches target identity
-              const authorEl = el.querySelector('a[role="link"] span, h3, h4, span.x193iq5w');
-              const authorText = (authorEl?.textContent || '').trim();
               const authorMatches = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
-
-              // Extract real comment ID and permalink if link is present
-              const permalinkAnchor = el.querySelector('a[href*="comment_id="]') as HTMLAnchorElement | null;
-              let commentId: string | undefined;
-              let commentPermalink: string | undefined;
-
-              if (permalinkAnchor) {
-                const match = permalinkAnchor.href.match(/comment_id=([0-9]+)/);
-                if (match) commentId = match[1];
-                commentPermalink = permalinkAnchor.href;
-              }
-
               return {
                 found: true,
                 commentId,
@@ -154,7 +187,7 @@ export class FacebookCommentDispatcher {
           }
 
           return { found: false, authorMatches: false };
-        }, { snippet: snippetToSearch, targetIdentity: targetPageName });
+        }, { snippet: snippetToSearch, targetIdentity: targetPageName, preExistingList: preExistingComments });
 
         if (confirmedComment.found && confirmedComment.authorMatches) {
           break;
@@ -197,63 +230,128 @@ export class FacebookCommentDispatcher {
   }
 
   /**
-   * Helper to check and switch Facebook commenting voice / identity
+   * Helper to check and switch Facebook commenting voice / identity,
+   * then strictly re-verifies active identity in the DOM after switching.
    */
-  public async verifyAndSwitchPageIdentity(page: Page, targetIdentity: string): Promise<{ matched: boolean; error?: string }> {
+  public async verifyAndSwitchPageIdentity(
+    page: Page, 
+    targetIdentity: string,
+    targetPageId?: string
+  ): Promise<{ matched: boolean; activeIdentity?: string; error?: string }> {
     try {
-      // Look for the identity switcher button near comment box or post
+      // Helper function to read the currently active voice from DOM
+      const readActiveVoice = async () => {
+        return await page.evaluate(() => {
+          // 1. Check avatar alt near comment input
+          const formImg = document.querySelector('div[role="textbox"]')?.closest('form')?.querySelector('img[alt]');
+          const formAlt = formImg?.getAttribute('alt');
+          if (formAlt) return formAlt.trim();
+
+          // 2. Check switcher element text/aria-label
+          const switcherEl = document.querySelector(
+            'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
+          );
+          if (switcherEl) {
+            const label = switcherEl.getAttribute('aria-label') || switcherEl.textContent || '';
+            if (label) return label.trim();
+          }
+
+          // 3. Check profile anchor near comment input
+          const anchor = document.querySelector('div[role="textbox"]')?.closest('form')?.querySelector('a[href*="facebook.com"]');
+          if (anchor) {
+            const anchorText = anchor.textContent?.trim();
+            const href = anchor.getAttribute('href') || '';
+            return `${anchorText || ''} [${href}]`.trim();
+          }
+
+          return null;
+        });
+      };
+
+      const isVoiceMatching = (voice: string | null): boolean => {
+        if (!voice) return false;
+        const vLower = voice.toLowerCase();
+        const tLower = targetIdentity.toLowerCase();
+        if (vLower.includes(tLower)) return true;
+        if (targetPageId && voice.includes(targetPageId)) return true;
+        return false;
+      };
+
+      // 1. Check current voice before touching switcher
+      const initialVoice = await readActiveVoice();
+      if (isVoiceMatching(initialVoice)) {
+        return { matched: true, activeIdentity: initialVoice || targetIdentity };
+      }
+
+      // 2. Locate the switcher button
       const switcher = await page.$(
         'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
       );
 
       if (!switcher) {
-        // If no switcher is visible, verify active account name in top header or near input
-        const currentVoice = await page.evaluate(() => {
-          const profileLink = document.querySelector('div[role="textbox"]')?.closest('form')?.querySelector('img[alt]');
-          return profileLink ? profileLink.getAttribute('alt') : null;
-        });
-
-        if (currentVoice && currentVoice.toLowerCase().includes(targetIdentity.toLowerCase())) {
-          return { matched: true };
-        }
-
-        // CRITICAL FIX: If no switcher is found and profile does not match target Page,
-        // strictly refuse to proceed with personal profile!
+        // No switcher found and initial voice doesn't match target Page
         return {
           matched: false,
-          error: `Không tìm thấy nút chuyển đổi danh tính và tài khoản hiện tại không mang tên Page "${targetIdentity}". Từ chối bình luận bằng tài khoản cá nhân.`,
+          error: `Không tìm thấy nút chuyển đổi danh tính và danh tính hiện tại ("${initialVoice || 'tài khoản cá nhân'}") không khớp Page "${targetIdentity}". Từ chối bình luận bằng tài khoản cá nhân.`,
         };
       }
 
-      // Check current switcher text
       const switcherText = (await switcher.textContent()) || (await switcher.getAttribute('aria-label')) || '';
-      if (switcherText.toLowerCase().includes(targetIdentity.toLowerCase())) {
-        return { matched: true };
+      if (isVoiceMatching(switcherText)) {
+        return { matched: true, activeIdentity: switcherText };
       }
 
       // Click switcher to choose target Page
       await switcher.click();
       await page.waitForTimeout(1000);
 
-      const switched = await page.evaluate((target) => {
+      const switched = await page.evaluate(({ target, pageId }) => {
         const options = Array.from(document.querySelectorAll('div[role="menuitem"], div[role="button"], div[role="radio"]'));
-        const targetOption = options.find(o => (o.textContent || '').toLowerCase().includes(target.toLowerCase()));
+        const targetOption = options.find(o => {
+          const text = (o.textContent || '').toLowerCase();
+          const targetLower = target.toLowerCase();
+          if (text.includes(targetLower)) return true;
+          if (pageId && (o.getAttribute('data-page-id') === pageId || text.includes(pageId))) return true;
+          return false;
+        });
         if (targetOption) {
           (targetOption as HTMLElement).click();
           return true;
         }
         return false;
-      }, targetIdentity);
+      }, { target: targetIdentity, pageId: targetPageId });
 
-      await page.waitForTimeout(1500);
-
-      if (switched) {
-        return { matched: true };
+      if (!switched) {
+        return {
+          matched: false,
+          error: `Không tìm thấy Page "${targetIdentity}" ${targetPageId ? `(ID: ${targetPageId})` : ''} trong danh sách vai trò có thể bình luận của tài khoản.`,
+        };
       }
 
+      // CRITICAL FIX: After clicking the selection, do NOT blindly assume success!
+      // Wait for DOM re-render and re-verify the active commenting identity.
+      await page.waitForTimeout(1500);
+
+      const postSwitchVoice = await readActiveVoice();
+      const currentSwitcher = await page.$(
+        'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
+      );
+      const postSwitcherText = currentSwitcher
+        ? ((await currentSwitcher.textContent()) || (await currentSwitcher.getAttribute('aria-label')) || '')
+        : '';
+
+      if (isVoiceMatching(postSwitchVoice) || isVoiceMatching(postSwitcherText)) {
+        return {
+          matched: true,
+          activeIdentity: postSwitchVoice || postSwitcherText || targetIdentity,
+        };
+      }
+
+      // Re-read failed to confirm target Page identity (still personal profile or unverified)
       return {
         matched: false,
-        error: `Không tìm thấy Page "${targetIdentity}" trong danh sách vai trò có thể bình luận của tài khoản.`,
+        activeIdentity: postSwitchVoice || postSwitcherText || undefined,
+        error: `Đã chọn Page "${targetIdentity}", nhưng sau khi chuyển, danh tính hoạt động trong DOM ghi nhận là "${postSwitchVoice || postSwitcherText || 'tài khoản cá nhân'}". Từ chối gửi bình luận để bảo đảm không dùng tài khoản cá nhân.`,
       };
     } catch (e: any) {
       console.warn(`[Dispatcher] Lỗi khi kiểm tra/chuyển đổi vai trò: ${e.message}`);

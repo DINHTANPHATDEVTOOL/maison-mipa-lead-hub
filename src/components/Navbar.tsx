@@ -15,14 +15,17 @@ import {
   AlertCircle,
   Lock,
   X,
-  LogIn
+  LogIn,
+  LogOut,
+  UserCheck
 } from 'lucide-react';
 import { UserRole } from '@/types';
 
 export default function Navbar() {
   const pathname = usePathname();
-  const [role, setRole] = useState<UserRole>('admin');
-  const [userName, setUserName] = useState<string>('Đinh Tấn Phát');
+  const [role, setRole] = useState<UserRole | null>(null);
+  const [userName, setUserName] = useState<string>('');
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [workerAlive, setWorkerAlive] = useState(false);
   const [operatingMode, setOperatingMode] = useState<'manual_review' | 'auto_dispatch'>('manual_review');
   const [staleSeconds, setStaleSeconds] = useState<number>(0);
@@ -44,27 +47,55 @@ export default function Navbar() {
   const checkActiveSession = async () => {
     try {
       const token = typeof window !== 'undefined' ? localStorage.getItem('mipa_token') : null;
-      const headers: Record<string, string> = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (!token) {
+        setIsAuthenticated(false);
+        setRole(null);
+        setUserName('');
+        return;
+      }
 
+      const headers: Record<string, string> = { 'Authorization': `Bearer ${token}` };
       const res = await fetch('/api/auth/me', { headers });
       const json = await res.json();
       if (json.success && json.user) {
+        setIsAuthenticated(true);
         setRole(json.user.role);
         setUserName(json.user.name);
         localStorage.setItem('mipa_token', json.user.token);
         localStorage.setItem('mipa_role', json.user.role);
+      } else {
+        // Token invalid or expired - strictly clear unauthenticated state
+        setIsAuthenticated(false);
+        setRole(null);
+        setUserName('');
+        localStorage.removeItem('mipa_token');
+        localStorage.removeItem('mipa_role');
       }
     } catch (e) {
       console.error('Session check error:', e);
+      setIsAuthenticated(false);
+      setRole(null);
+      setUserName('');
     }
   };
 
   const handleRoleButtonClick = (targetRole: UserRole) => {
-    if (targetRole === role) return;
+    // If already authenticated with target role, do nothing
+    if (isAuthenticated && targetRole === role) return;
+
+    // If unauthenticated or switching accounts, always prompt login modal!
     setLoginModalRole(targetRole);
     setLoginPassword('');
     setLoginError(null);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('mipa_token');
+    localStorage.removeItem('mipa_role');
+    setIsAuthenticated(false);
+    setRole(null);
+    setUserName('');
+    window.location.reload();
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -82,6 +113,7 @@ export default function Navbar() {
       const json = await res.json();
 
       if (json.success && json.data) {
+        setIsAuthenticated(true);
         setRole(json.data.role);
         setUserName(json.data.name);
         localStorage.setItem('mipa_token', json.data.token);
@@ -128,7 +160,7 @@ export default function Navbar() {
     { href: '/settings', label: 'Cài Đặt & Kiểm Tra', icon: Settings, roles: ['admin'] },
   ];
 
-  const filteredNav = navItems.filter(item => item.roles.includes(role));
+  const filteredNav = role ? navItems.filter(item => item.roles.includes(role)) : navItems;
 
   const roleLabels: Record<UserRole, string> = {
     admin: 'Quản Trị Viên (Admin)',
@@ -201,22 +233,51 @@ export default function Navbar() {
               </div>
 
               {/* Staff Accounts Selector */}
-              <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-1 text-xs">
-                <span className="text-zinc-400 px-2 text-[11px] font-medium hidden sm:inline">Tài khoản:</span>
-                {(['admin', 'marketing', 'cskh'] as UserRole[]).map((r) => (
+              {isAuthenticated && role ? (
+                <div className="flex items-center space-x-2">
+                  <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-1 text-xs">
+                    <span className="text-zinc-400 px-2 text-[11px] font-medium hidden sm:inline">{userName || 'Tài khoản'}:</span>
+                    {(['admin', 'marketing', 'cskh'] as UserRole[]).map((r) => (
+                      <button
+                        key={r}
+                        onClick={() => handleRoleButtonClick(r)}
+                        className={`px-2.5 py-1 rounded text-xs capitalize font-medium transition-colors ${
+                          role === r
+                            ? 'bg-amber-600 text-white shadow-sm font-semibold'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {r === 'admin' ? 'Admin' : r === 'marketing' ? 'Marketing' : 'CSKH'}
+                      </button>
+                    ))}
+                  </div>
                   <button
-                    key={r}
-                    onClick={() => handleRoleButtonClick(r)}
-                    className={`px-2.5 py-1 rounded text-xs capitalize font-medium transition-colors ${
-                      role === r
-                        ? 'bg-amber-600 text-white shadow-sm font-semibold'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
+                    onClick={handleLogout}
+                    title="Đăng xuất khỏi hệ thống"
+                    className="p-1.5 rounded-lg bg-zinc-900 hover:bg-rose-950/40 text-zinc-400 hover:text-rose-300 border border-zinc-800 hover:border-rose-500/30 transition-colors"
                   >
-                    {r === 'admin' ? 'Admin' : r === 'marketing' ? 'Marketing' : 'CSKH'}
+                    <LogOut className="w-4 h-4" />
                   </button>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-2">
+                  <div className="flex items-center bg-zinc-900 border border-amber-500/30 rounded-lg p-1 text-xs">
+                    <span className="text-amber-400 px-2 text-[11px] font-medium flex items-center space-x-1">
+                      <Lock className="w-3 h-3 text-amber-400" />
+                      <span className="hidden sm:inline">Đăng nhập:</span>
+                    </span>
+                    {(['admin', 'marketing', 'cskh'] as UserRole[]).map((r) => (
+                      <button
+                        key={r}
+                        onClick={() => handleRoleButtonClick(r)}
+                        className="px-2.5 py-1 rounded text-xs font-semibold text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors"
+                      >
+                        {r === 'admin' ? 'Admin' : r === 'marketing' ? 'Marketing' : 'CSKH'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
             </div>
 
@@ -231,7 +292,7 @@ export default function Navbar() {
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center space-x-2 text-white font-bold text-sm">
                 <Lock className="w-4 h-4 text-amber-500" />
-                <span>Xác Thực Tài Khoản</span>
+                <span>{isAuthenticated ? 'Chuyển Đổi Tài Khoản' : 'Đăng Nhập Tài Khoản'}</span>
               </div>
               <button 
                 onClick={() => setLoginModalRole(null)}
@@ -243,7 +304,9 @@ export default function Navbar() {
 
             <form onSubmit={handleLoginSubmit} className="space-y-3.5 text-xs">
               <div>
-                <span className="text-zinc-400 block mb-1">Chuyển sang vai trò:</span>
+                <span className="text-zinc-400 block mb-1">
+                  {isAuthenticated ? 'Chuyển sang vai trò:' : 'Đăng nhập vào vai trò:'}
+                </span>
                 <div className="p-2.5 rounded bg-zinc-900 border border-zinc-800 text-amber-300 font-semibold text-xs">
                   {roleLabels[loginModalRole]}
                 </div>

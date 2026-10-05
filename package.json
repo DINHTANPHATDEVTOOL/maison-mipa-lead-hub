@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "worker": "tsx src/worker/index.ts",
+    "test": "tsx tests/test-e2e-fixes.ts",
     "test:auth": "tsx src/worker/test-auth.ts",
     "test:crawler": "tsx src/worker/test-crawler.ts"
   },
@@ -28,7 +29,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.6.1",
-    "playwright": "^1.50.0",
+    "playwright": "1.50.0",
     "postcss": "^8.5.28",
     "tailwindcss": "^3.4.19",
     "tsx": "^4.23.15",
