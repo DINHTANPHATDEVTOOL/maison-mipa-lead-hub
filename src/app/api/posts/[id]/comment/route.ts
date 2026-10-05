@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
 import { checkRolePermission } from '@/lib/auth';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function POST(
   req: Request,
   { params }: { params: { id: string } }

@@ -223,6 +223,11 @@ export class FacebookAuthManager {
       };
     }
   }
+
+  public getStorageStatePath(): string | undefined {
+    const summary = this.getSessionSummary();
+    return summary.filePath || undefined;
+  }
 }
 
 export const authManager = new FacebookAuthManager();

@@ -139,6 +139,6 @@ export interface WorkerHeartbeat {
   facebook_auth_valid: boolean;
   page_permission_valid: boolean;
   active_jobs_count: number;
-  last_ping: string;
+  last_ping: string | null;
   operating_mode: 'manual_review' | 'auto_dispatch';
 }

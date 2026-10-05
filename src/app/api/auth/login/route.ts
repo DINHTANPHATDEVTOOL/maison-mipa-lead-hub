@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import crypto from 'crypto';
-import { SYSTEM_STAFF_ACCOUNTS } from '@/lib/auth';
+import { verifyCredentials } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -10,23 +9,28 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { email, password, role } = body;
 
-    let user;
-    if (email) {
-      user = SYSTEM_STAFF_ACCOUNTS.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
-    } else if (role) {
-      user = SYSTEM_STAFF_ACCOUNTS.find(u => u.role === role);
+    // Password is strictly mandatory
+    if (!password || typeof password !== 'string' || password.trim() === '') {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Mật khẩu là bắt buộc. Hệ thống từ chối đăng nhập khi thiếu mật khẩu.' 
+      }, { status: 400 });
     }
+
+    if (!email && !role) {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Vui lòng cung cấp email hoặc vai trò để đăng nhập.' 
+      }, { status: 400 });
+    }
+
+    const { user, error } = verifyCredentials({ email, role, password });
 
     if (!user) {
-      return NextResponse.json({ success: false, error: 'Tài khoản không tồn tại trên hệ thống Maison MIPA.' }, { status: 401 });
-    }
-
-    // Check password if provided, or verify default dev password
-    if (password) {
-      const inputHash = crypto.createHash('sha256').update(password).digest('hex');
-      if (inputHash !== user.passwordHash) {
-        return NextResponse.json({ success: false, error: 'Mật khẩu không chính xác.' }, { status: 401 });
-      }
+      return NextResponse.json({ 
+        success: false, 
+        error: error || 'Xác thực không thành công. Thông tin tài khoản hoặc mật khẩu sai.' 
+      }, { status: 401 });
     }
 
     // Set secure auth cookie
@@ -42,7 +46,7 @@ export async function POST(req: Request) {
     });
 
     response.cookies.set('mipa_auth_token', user.token, {
-      httpOnly: false, // Accessible to client for headers
+      httpOnly: false,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       path: '/',

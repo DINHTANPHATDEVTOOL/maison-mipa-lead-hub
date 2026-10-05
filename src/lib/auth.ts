@@ -9,13 +9,27 @@ export interface AuthUser {
   token: string;
 }
 
+// Configurable passwords with secure fallbacks (overridable via environment)
+const ADMIN_PASSWORD = process.env.MIPA_ADMIN_PASSWORD || 'mipa@admin2026';
+const MARKETING_PASSWORD = process.env.MIPA_MARKETING_PASSWORD || 'mipa@mkt2026';
+const CSKH_PASSWORD = process.env.MIPA_CSKH_PASSWORD || 'mipa@cskh2026';
+
+// Cryptographic hash helper
+function hashPassword(pass: string): string {
+  return crypto.createHash('sha256').update(pass).digest('hex');
+}
+
+function generateToken(email: string, pass: string): string {
+  return 'mipa_sec_' + crypto.createHash('sha256').update(`${email}:${pass}:${process.env.APP_SECRET || 'mipa-salt-2026'}`).digest('hex');
+}
+
 // Built-in initial staff accounts
 export const SYSTEM_STAFF_ACCOUNTS: Array<{
   id: string;
   name: string;
   email: string;
   role: UserRole;
-  passwordHash: string; // SHA-256
+  passwordHash: string;
   token: string;
 }> = [
   {
@@ -23,30 +37,30 @@ export const SYSTEM_STAFF_ACCOUNTS: Array<{
     name: 'Đinh Tấn Phát (Quản Trị)',
     email: 'admin@maisonmipa.vn',
     role: 'admin',
-    // Hash for 'mipa@2026'
-    passwordHash: crypto.createHash('sha256').update('mipa@2026').digest('hex'),
-    token: 'mipa_token_admin_sec_' + crypto.createHash('sha256').update('admin@maisonmipa.vn:mipa@2026').digest('hex').slice(0, 32),
+    passwordHash: hashPassword(ADMIN_PASSWORD),
+    token: generateToken('admin@maisonmipa.vn', ADMIN_PASSWORD),
   },
   {
     id: 'user-mkt-01',
     name: 'Trần Minh Thư (Marketing)',
     email: 'marketing@maisonmipa.vn',
     role: 'marketing',
-    passwordHash: crypto.createHash('sha256').update('mipa@2026').digest('hex'),
-    token: 'mipa_token_mkt_sec_' + crypto.createHash('sha256').update('marketing@maisonmipa.vn:mipa@2026').digest('hex').slice(0, 32),
+    passwordHash: hashPassword(MARKETING_PASSWORD),
+    token: generateToken('marketing@maisonmipa.vn', MARKETING_PASSWORD),
   },
   {
     id: 'user-cskh-01',
     name: 'Nguyễn Ngọc Lan (CSKH & Chốt Lịch)',
     email: 'cskh@maisonmipa.vn',
     role: 'cskh',
-    passwordHash: crypto.createHash('sha256').update('mipa@2026').digest('hex'),
-    token: 'mipa_token_cskh_sec_' + crypto.createHash('sha256').update('cskh@maisonmipa.vn:mipa@2026').digest('hex').slice(0, 32),
+    passwordHash: hashPassword(CSKH_PASSWORD),
+    token: generateToken('cskh@maisonmipa.vn', CSKH_PASSWORD),
   },
 ];
 
 // Internal service key for background worker communication
-const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY || 'mipa_internal_worker_key_2026';
+// MUST be explicitly provided via environment variable. NO insecure public fallback!
+const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY?.trim() || null;
 
 export interface VerifyAuthResult {
   success: boolean;
@@ -61,18 +75,26 @@ export interface VerifyAuthResult {
 export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthResult {
   // 1. Check Internal Worker Service Key
   const workerKey = req.headers.get('x-worker-key');
-  if (workerKey && workerKey === INTERNAL_WORKER_KEY) {
-    return {
-      success: true,
-      user: {
-        id: 'worker-internal-01',
-        name: 'Maison MIPA Central Worker',
-        email: 'worker@internal.maisonmipa.vn',
-        role: 'admin',
-        token: workerKey,
-      },
-      status: 200,
-    };
+  if (workerKey) {
+    if (INTERNAL_WORKER_KEY && INTERNAL_WORKER_KEY.length >= 16 && workerKey === INTERNAL_WORKER_KEY) {
+      return {
+        success: true,
+        user: {
+          id: 'worker-internal-01',
+          name: 'Maison MIPA Central Worker',
+          email: 'worker@internal.maisonmipa.vn',
+          role: 'admin',
+          token: workerKey,
+        },
+        status: 200,
+      };
+    } else {
+      return {
+        success: false,
+        error: 'Từ chối xác thực: Khóa dịch vụ Worker (x-worker-key) không hợp lệ hoặc chưa được thiết lập an toàn qua biến môi trường INTERNAL_WORKER_KEY.',
+        status: 401,
+      };
+    }
   }
 
   // 2. Extract Bearer Token from Authorization Header or Cookie
@@ -140,6 +162,46 @@ export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthR
 }
 
 /**
+ * Verify staff credentials for login
+ */
+export function verifyCredentials(credentials: { email?: string; role?: string; password?: string }): {
+  user: AuthUser | null;
+  error?: string;
+} {
+  const { email, role, password } = credentials;
+
+  if (!password || password.trim() === '') {
+    return { user: null, error: 'Mật khẩu là bắt buộc để đăng nhập.' };
+  }
+
+  let account;
+  if (email) {
+    account = SYSTEM_STAFF_ACCOUNTS.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
+  } else if (role) {
+    account = SYSTEM_STAFF_ACCOUNTS.find(u => u.role === role);
+  }
+
+  if (!account) {
+    return { user: null, error: 'Tài khoản không tồn tại trên hệ thống Maison MIPA.' };
+  }
+
+  const inputHash = hashPassword(password);
+  if (inputHash !== account.passwordHash) {
+    return { user: null, error: 'Mật khẩu không chính xác.' };
+  }
+
+  return {
+    user: {
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      role: account.role,
+      token: account.token,
+    },
+  };
+}
+
+/**
  * Legacy compatibility wrapper with strict enforcement
  */
 export function checkRolePermission(req: Request, allowedRoles: UserRole[]): { allowed: boolean; role: UserRole; error?: string; status: number } {
@@ -158,3 +220,4 @@ export function checkRolePermission(req: Request, allowedRoles: UserRole[]): { a
     status: 200,
   };
 }
+

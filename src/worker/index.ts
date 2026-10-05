@@ -111,11 +111,7 @@ async function runWorkerCycle() {
   }
 
   // Ping heartbeat
-  store.updateHeartbeat({
-    is_alive: true,
-    last_ping: new Date().toISOString(),
-    active_jobs_count: groups.length,
-  });
+  store.recordWorkerPing('worker-ubuntu-central-01', groups.length);
 }
 
 // Main execution loop

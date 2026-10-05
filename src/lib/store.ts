@@ -20,6 +20,7 @@ import { classifyPostContent } from '@/lib/classifier';
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_FILE = path.join(DATA_DIR, 'mipa_shared_store.json');
 const STORE_TEMP_FILE = path.join(DATA_DIR, 'mipa_shared_store.tmp');
+const LOCK_DIR = path.join(DATA_DIR, 'store.lock');
 
 function hashUrl(url: string): string {
   return crypto.createHash('sha256').update(url.trim().toLowerCase()).digest('hex');
@@ -50,6 +51,62 @@ class LeadHubSharedStore {
       g.__mipaSharedStoreInstance = new LeadHubSharedStore();
     }
     return g.__mipaSharedStoreInstance;
+  }
+
+  // --- Concurrency Control (Inter-process POSIX File Lock) ---
+  private withFileLock<T>(fn: () => T, timeoutMs: number = 8000): T {
+    const start = Date.now();
+    let acquired = false;
+
+    while (!acquired) {
+      try {
+        fs.mkdirSync(LOCK_DIR);
+        acquired = true;
+      } catch (err: any) {
+        if (err.code === 'EEXIST') {
+          // Check for stale lock (older than 10 seconds)
+          try {
+            const stats = fs.statSync(LOCK_DIR);
+            if (Date.now() - stats.mtimeMs > 10000) {
+              fs.rmdirSync(LOCK_DIR);
+              continue;
+            }
+          } catch {
+            // lock may have been released between stat and rmdir
+          }
+
+          if (Date.now() - start > timeoutMs) {
+            console.warn(`[SharedStore] Timeout chờ khóa tệp dữ liệu (${timeoutMs}ms). Cưỡng chế mở khóa cũ.`);
+            try {
+              fs.rmdirSync(LOCK_DIR);
+            } catch {}
+          } else {
+            // Delay 15ms
+            const delayMs = 15;
+            try {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+            } catch {
+              const waitEnd = Date.now() + delayMs;
+              while (Date.now() < waitEnd) {}
+            }
+          }
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    try {
+      return fn();
+    } finally {
+      try {
+        if (fs.existsSync(LOCK_DIR)) {
+          fs.rmdirSync(LOCK_DIR);
+        }
+      } catch {
+        // ignore lock release error
+      }
+    }
   }
 
   // --- Persistence Layer (Atomic File Sync) ---
@@ -99,28 +156,28 @@ class LeadHubSharedStore {
           code: 'NANG_THO',
           name: 'Concept Nàng Thơ & Vintage Studio',
           base_price: 1500000,
-          price_note: 'Đã bao gồm makeup và 2 layout trang phục',
-          service_area: 'Studio Maison MIPA (Q.1)',
+          price_note: 'Gói cá nhân, bao gồm makeup nhẹ và layout hoa tươi',
+          service_area: 'Studio Maison MIPA (Quận 1, TP.HCM)',
           includes_posing_support: true,
           is_active: true,
         },
         {
           id: 'srv-03',
-          code: 'PRE_WEDDING',
-          name: 'Gói Chụp Đôi / Pre-Wedding Nhẹ Nhàng',
-          base_price: 2800000,
-          price_note: 'Chụp ngoại cảnh hoặc phim trường, 25 ảnh chỉnh sửa',
-          service_area: 'TP. Hồ Chí Minh & lân cận',
+          code: 'KY_YEU',
+          name: 'Kỷ Yếu Nhóm & Tốt Nghiệp',
+          base_price: 2500000,
+          price_note: 'Gói nhóm từ 5-10 bạn, chụp ngoại cảnh + lớp học',
+          service_area: 'TP. Hồ Chí Minh & Bình Dương',
           includes_posing_support: true,
           is_active: true,
         },
         {
           id: 'srv-04',
-          code: 'KY_YEU',
-          name: 'Kỷ Yếu Nghệ Thuật / Chụp Nhóm Bạn',
-          base_price: 850000,
-          price_note: 'Giá áp dụng từ 4 bạn trở lên, đã gồm phụ kiện kỷ yếu',
-          service_area: 'TP. Hồ Chí Minh',
+          code: 'GIA_DINH',
+          name: 'Ảnh Gia Đình & Em Bé Đầy Tháng',
+          base_price: 2200000,
+          price_note: 'Gói gia đình 3-5 thành viên, phòng chụp máy lạnh riêng biệt',
+          service_area: 'Studio Maison MIPA (Quận 1, TP.HCM)',
           includes_posing_support: true,
           is_active: true,
         }
@@ -129,24 +186,35 @@ class LeadHubSharedStore {
         {
           id: 'tpl-01',
           service_id: 'srv-01',
-          title: 'Mẫu Áo Dài - Có Hướng Dẫn Tạo Dáng Chi Tiết',
+          title: 'Mẫu Tiếp Cận Áo Dài (Nhẹ Nhàng, Nêu Giá & Tạo Dáng)',
           template_content: 'Chào bạn nha, Maison MIPA chuyên các bộ ảnh Áo dài tại {khu_vuc} ({gia}). Bên mình có stylist hướng dẫn tạo dáng chi tiết từng góc chụp cho bạn hoàn toàn yên tâm nhé! Bạn nhắn Page để tiệm gửi album ảnh mẫu tham khảo nha.',
           allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}'],
           is_approved: true,
           version: 1,
-          updated_by_name: 'Admin Maison MIPA',
-          updated_at: new Date(Date.now() - 86400000 * 2).toISOString(),
+          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_at: new Date().toISOString(),
         },
         {
           id: 'tpl-02',
           service_id: 'srv-02',
-          title: 'Mẫu Concept Nàng Thơ Studio Trọn Gói',
-          template_content: 'Dạ chào bạn, concept Nàng thơ tại Studio Maison MIPA hiện có ưu đãi trọn gói từ {gia} (đã gồm makeup & trang phục, có hỗ trợ tạo dáng). Mời bạn ghé Page tiệm xem qua album concept mới nhất nhé!',
+          title: 'Mẫu Concept Nàng Thơ Studio (Tone Hàn/Vintage)',
+          template_content: 'Dạ chào bạn, concept nàng thơ tại Maison MIPA ({khu_vuc}) đang có gói trọn gói {gia} đã gồm makeup nhẹ nhàng và hoa tươi theo tone. Bạn ghé Page xem một số bộ ảnh tiệm vừa thực hiện nhé!',
           allowed_placeholders: ['{gia}', '{khu_vuc}'],
           is_approved: true,
-          version: 2,
-          updated_by_name: 'Marketing Lead',
-          updated_at: new Date(Date.now() - 86400000).toISOString(),
+          version: 1,
+          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: 'tpl-03',
+          service_id: 'srv-03',
+          title: 'Mẫu Kỷ Yếu & Tốt Nghiệp Nhóm',
+          template_content: 'Chào các bạn, Maison MIPA có gói chụp kỷ yếu nhóm tại {khu_vuc} giá chỉ từ {gia}. Studio hỗ trợ lên concept và hướng dẫn tạo dáng cho cả nhóm cực tự nhiên. Bạn nhắn Page để team tư vấn lịch chụp nhé!',
+          allowed_placeholders: ['{gia}', '{khu_vuc}'],
+          is_approved: true,
+          version: 1,
+          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_at: new Date().toISOString(),
         }
       ],
       groups: [
@@ -214,11 +282,11 @@ class LeadHubSharedStore {
       heartbeat: {
         worker_id: 'worker-ubuntu-central-01',
         worker_name: 'Maison MIPA Central Worker',
-        is_alive: false, // Calculated dynamically
+        is_alive: false, // Calculated dynamically from worker ping
         facebook_auth_valid: authManager.hasStoredSession(),
         page_permission_valid: true,
-        active_jobs_count: 2,
-        last_ping: new Date().toISOString(),
+        active_jobs_count: 0,
+        last_ping: null, // Strictly null until actual worker process pings
         operating_mode: 'manual_review',
       }
     };
@@ -230,33 +298,41 @@ class LeadHubSharedStore {
   }
 
   public addGroup(data: Omit<FacebookGroup, 'id' | 'last_checked_at' | 'next_check_at' | 'total_posts_found' | 'last_error_message' | 'created_at'>): FacebookGroup {
-    const storeData = this.readData();
-    const newGroup: FacebookGroup = {
-      ...data,
-      id: `grp-${Date.now()}`,
-      last_checked_at: null,
-      next_check_at: new Date(Date.now() + data.check_interval_seconds * 1000).toISOString(),
-      total_posts_found: 0,
-      last_error_message: null,
-      created_at: new Date().toISOString(),
-    };
-    storeData.groups.unshift(newGroup);
-    this.writeData(storeData);
-    return newGroup;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const newGroup: FacebookGroup = {
+        ...data,
+        id: `grp-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        last_checked_at: null,
+        next_check_at: new Date(Date.now() + data.check_interval_seconds * 1000).toISOString(),
+        total_posts_found: 0,
+        last_error_message: null,
+        created_at: new Date().toISOString(),
+      };
+      storeData.groups.unshift(newGroup);
+      this.writeData(storeData);
+      return newGroup;
+    });
   }
 
   public updateGroup(id: string, updates: Partial<FacebookGroup>): FacebookGroup | null {
-    const storeData = this.readData();
-    const idx = storeData.groups.findIndex(g => g.id === id);
-    if (idx === -1) return null;
-    storeData.groups[idx] = { ...storeData.groups[idx], ...updates };
-    this.writeData(storeData);
-    return storeData.groups[idx];
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const idx = storeData.groups.findIndex(g => g.id === id);
+      if (idx === -1) return null;
+      storeData.groups[idx] = { ...storeData.groups[idx], ...updates };
+      this.writeData(storeData);
+      return storeData.groups[idx];
+    });
   }
 
-  // --- Posts & Ingestion (Rock-solid Anti-duplication) ---
+  // --- Posts & Anti-Duplication API ---
   public getPosts(): FacebookPost[] {
     return this.readData().posts;
+  }
+
+  public getPostById(id: string): FacebookPost | null {
+    return this.readData().posts.find(p => p.id === id) || null;
   }
 
   public addPostIfNew(postData: {
@@ -268,94 +344,119 @@ class LeadHubSharedStore {
     content_raw: string;
     posted_at?: string;
   }): { post: FacebookPost; isNew: boolean } {
-    const storeData = this.readData();
-    
-    // Canonicalize URL
-    const canonical = canonicalizeFacebookUrl(postData.post_url);
-    const postUrlHash = canonical.postHash;
-    const finalPostId = postData.facebook_post_id || canonical.postId;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      
+      // Canonicalize URL
+      const canonical = canonicalizeFacebookUrl(postData.post_url);
+      const postUrlHash = canonical.postHash;
+      const finalPostId = postData.facebook_post_id || canonical.postId;
 
-    // Compute content fingerprint
-    const contentFingerprint = crypto
-      .createHash('sha256')
-      .update(`${postData.author_name}:${postData.content_raw.slice(0, 200)}`.toLowerCase())
-      .digest('hex');
-
-    // Multi-factor Deduplication Check
-    const existing = storeData.posts.find(p => {
-      if (finalPostId && p.facebook_post_id && p.facebook_post_id === finalPostId) return true;
-      if (p.post_url_hash === postUrlHash) return true;
-      const pFingerprint = crypto
+      // Compute content fingerprint
+      const contentFingerprint = crypto
         .createHash('sha256')
-        .update(`${p.author_name}:${p.content_raw.slice(0, 200)}`.toLowerCase())
+        .update(`${postData.author_name}:${postData.content_raw.slice(0, 200)}`.toLowerCase())
         .digest('hex');
-      return pFingerprint === contentFingerprint;
-    });
 
-    if (existing) {
-      // If content changed, update and re-run classification
-      if (existing.content_raw !== postData.content_raw) {
-        existing.content_raw = postData.content_raw;
-        const reclass = classifyPostContent(postData.content_raw, storeData.services, storeData.templates, existing.posted_at);
-        existing.classification = {
-          id: existing.classification?.id || `cls-${Date.now()}`,
-          post_id: existing.id,
-          intent: reclass.intent,
-          service_detected: reclass.service_detected,
-          location: reclass.location,
-          pax: reclass.pax,
-          shooting_date_text: reclass.shooting_date_text,
-          shooting_date_suggested: reclass.shooting_date_suggested,
-          budget_raw: reclass.budget_raw,
-          extra_requirements: reclass.extra_requirements,
-          confidence_score: reclass.confidence_score,
-          classification_reason: reclass.classification_reason,
-          suggested_template_id: reclass.suggested_template_id,
-          suggested_comment_text: reclass.suggested_comment_text,
-          review_status: reclass.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
-        };
-        this.writeData(storeData);
+      // Deduplication Check
+      // 1. Same Post ID -> definite duplicate
+      // 2. Same post URL hash with valid post ID -> definite duplicate
+      // 3. Fallback when post ID is absent: match author + content in same group
+      const existing = storeData.posts.find(p => {
+        if (finalPostId && p.facebook_post_id && p.facebook_post_id === finalPostId) {
+          return true;
+        }
+        if (canonical.postId && p.post_url_hash === postUrlHash) {
+          return true;
+        }
+        if (!finalPostId && !p.facebook_post_id && p.group_id === postData.group_id) {
+          const pFingerprint = crypto
+            .createHash('sha256')
+            .update(`${p.author_name}:${p.content_raw.slice(0, 200)}`.toLowerCase())
+            .digest('hex');
+          return pFingerprint === contentFingerprint;
+        }
+        return false;
+      });
+
+      if (existing) {
+        // If content changed, update and re-run classification
+        if (existing.content_raw !== postData.content_raw) {
+          existing.content_raw = postData.content_raw;
+          const reclass = classifyPostContent(postData.content_raw, storeData.services, storeData.templates, existing.posted_at);
+          existing.classification = {
+            id: existing.classification?.id || `cls-${Date.now()}`,
+            post_id: existing.id,
+            intent: reclass.intent,
+            service_detected: reclass.service_detected,
+            location: reclass.location,
+            pax: reclass.pax,
+            shooting_date_text: reclass.shooting_date_text,
+            shooting_date_suggested: reclass.shooting_date_suggested,
+            budget_raw: reclass.budget_raw,
+            extra_requirements: reclass.extra_requirements,
+            confidence_score: reclass.confidence_score,
+            classification_reason: reclass.classification_reason,
+            suggested_template_id: reclass.suggested_template_id,
+            suggested_comment_text: reclass.suggested_comment_text,
+            review_status: reclass.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
+          };
+          this.writeData(storeData);
+        }
+        return { post: existing, isNew: false };
       }
-      return { post: existing, isNew: false };
-    }
 
-    const newPost: FacebookPost = {
-      id: `post-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      group_id: postData.group_id,
-      group_name: postData.group_name,
-      facebook_post_id: finalPostId,
-      post_url: canonical.canonicalUrl,
-      post_url_hash: postUrlHash,
-      author_name: postData.author_name || 'Khách hàng Facebook',
-      content_raw: postData.content_raw,
-      posted_at: postData.posted_at || new Date().toISOString(),
-      detected_at: new Date().toISOString(),
-    };
+      // Check if there is a similar content from the same author with different post ID (suspected cross-post / duplicate)
+      const isSuspectedDuplicate = storeData.posts.some(p => {
+        const pFingerprint = crypto
+          .createHash('sha256')
+          .update(`${p.author_name}:${p.content_raw.slice(0, 200)}`.toLowerCase())
+          .digest('hex');
+        return pFingerprint === contentFingerprint && p.facebook_post_id !== finalPostId;
+      });
 
-    const grp = storeData.groups.find(g => g.id === postData.group_id);
-    if (grp) grp.total_posts_found += 1;
+      const newPost: FacebookPost = {
+        id: `post-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        group_id: postData.group_id,
+        group_name: postData.group_name,
+        facebook_post_id: finalPostId,
+        post_url: canonical.canonicalUrl,
+        post_url_hash: postUrlHash,
+        author_name: postData.author_name || 'Khách hàng Facebook',
+        content_raw: postData.content_raw,
+        posted_at: postData.posted_at || new Date().toISOString(),
+        detected_at: new Date().toISOString(),
+      };
 
-    storeData.posts.unshift(newPost);
-    this.writeData(storeData);
-    return { post: newPost, isNew: true };
+      const grp = storeData.groups.find(g => g.id === postData.group_id);
+      if (grp) grp.total_posts_found += 1;
+
+      storeData.posts.unshift(newPost);
+      this.writeData(storeData);
+      return { post: newPost, isNew: true };
+    });
   }
 
   public updatePostClassification(postId: string, classification: LeadClassification): boolean {
-    const storeData = this.readData();
-    const post = storeData.posts.find(p => p.id === postId);
-    if (!post) return false;
-    post.classification = classification;
-    this.writeData(storeData);
-    return true;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const post = storeData.posts.find(p => p.id === postId);
+      if (!post) return false;
+      post.classification = classification;
+      this.writeData(storeData);
+      return true;
+    });
   }
 
   public updatePostInteraction(postId: string, interaction: OutreachInteraction): boolean {
-    const storeData = this.readData();
-    const post = storeData.posts.find(p => p.id === postId);
-    if (!post) return false;
-    post.interaction = interaction;
-    this.writeData(storeData);
-    return true;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const post = storeData.posts.find(p => p.id === postId);
+      if (!post) return false;
+      post.interaction = interaction;
+      this.writeData(storeData);
+      return true;
+    });
   }
 
   // --- REAL OUTREACH DISPATCHER (STRICT ANTI-DUPLICATION & VERIFICATION) ---
@@ -372,222 +473,226 @@ class LeadHubSharedStore {
     error?: string;
     needsAuth?: boolean;
   }> {
-    const storeData = this.readData();
-    const post = storeData.posts.find(p => p.id === postId);
-    if (!post) {
-      return { success: false, error: 'Không tìm thấy bài viết trên hệ thống.' };
-    }
+    // Phase 1: Lock and validate precondition
+    const preCheck = this.withFileLock(() => {
+      const storeData = this.readData();
+      const post = storeData.posts.find(p => p.id === postId);
+      if (!post) {
+        return { success: false, error: 'Không tìm thấy bài viết trên hệ thống.' };
+      }
 
-    // CHECK 1: Ensure single first-touch outreach (BLOCK sent_confirmed, sending, AND uncertain_failed)
-    if (post.interaction) {
-      if (post.interaction.status === 'sent_confirmed') {
+      // STRICT IDEMPOTENCY: BLOCK sent_confirmed AND manual_assisted
+      if (post.interaction) {
+        if (post.interaction.status === 'sent_confirmed' || post.interaction.status === 'manual_assisted') {
+          const method = post.interaction.status === 'manual_assisted' ? 'Tiếp cận thủ công' : 'Đã gửi qua Page';
+          return { 
+            success: false, 
+            error: `Bài viết này đã được tiếp cận trước đó (${method}). Khóa an toàn chống gửi trùng lặp!` 
+          };
+        }
+        if (post.interaction.status === 'sending') {
+          return { 
+            success: false, 
+            error: 'Bình luận đang trong tiến trình xử lý tại trình duyệt. Vui lòng chờ kết quả.' 
+          };
+        }
+        if (post.interaction.status === 'uncertain_failed' && !isManualAssisted) {
+          return { 
+            success: false, 
+            error: 'Bài viết đang ở trạng thái [Chưa xác định kết quả]. Chặn tự động gửi lại để chống lặp! Vui lòng kiểm tra thực tế trên Facebook hoặc dùng chế độ duyệt thủ công.' 
+          };
+        }
+      }
+
+      // Check Page commenting permissions
+      const group = storeData.groups.find(g => g.id === post.group_id);
+      if (group && !group.can_page_comment && !isManualAssisted) {
         return { 
           success: false, 
-          error: 'Bài viết này đã được gửi bình luận và xác nhận thành công trước đó. Bị chặn tuyệt đối để chống spam!' 
+          error: 'Page hiện chưa có quyền bình luận trong nhóm này. Vui lòng cấp quyền hoặc dùng chế độ hỗ trợ thủ công.' 
         };
       }
-      if (post.interaction.status === 'sending') {
-        return { 
-          success: false, 
-          error: 'Bình luận đang trong tiến trình xử lý tại trình duyệt. Vui lòng chờ kết quả.' 
-        };
-      }
-      if (post.interaction.status === 'uncertain_failed' && !isManualAssisted) {
-        return { 
-          success: false, 
-          error: 'Bài viết đang ở trạng thái [Chưa xác định kết quả] (có thể đã đăng thành công trên Facebook nhưng mạng gián đoạn). Chặn tự động gửi lại để chống lặp! Vui lòng kiểm tra thực tế trên Facebook hoặc dùng chế độ duyệt thủ công.' 
-        };
-      }
-    }
 
-    // CHECK 2: Can Page comment in this group?
-    const group = storeData.groups.find(g => g.id === post.group_id);
-    if (group && !group.can_page_comment && !isManualAssisted) {
-      return { 
-        success: false, 
-        error: 'Page hiện chưa có quyền bình luận trong nhóm này. Vui lòng cấp quyền hoặc dùng chế độ hỗ trợ thủ công.' 
-      };
-    }
+      // CASE A: Manual Assisted Mode - immediately finalize
+      if (isManualAssisted) {
+        const interaction: OutreachInteraction = {
+          id: `int-${Date.now()}`,
+          post_id: postId,
+          page_identity: 'Maison MIPA Photography',
+          operator_name: `${operatorName} (Thủ công)`,
+          template_used_id: post.classification?.suggested_template_id || 'manual',
+          comment_content: commentContent,
+          status: 'manual_assisted',
+          comment_permalink: manualProofUrl || post.post_url,
+          dispatched_at: new Date().toISOString(),
+        };
 
-    // CASE A: Manual Assisted Mode
-    if (isManualAssisted) {
-      const interaction: OutreachInteraction = {
+        post.interaction = interaction;
+        if (post.classification) {
+          post.classification.review_status = 'approved';
+        }
+
+        // Create CRM lead
+        let lead = storeData.leads.find(l => l.post_id === postId);
+        if (!lead) {
+          lead = {
+            id: `lead-${Date.now()}`,
+            post_id: postId,
+            customer_name: post.author_name,
+            customer_facebook_url: post.post_url,
+            service_interest: post.classification?.service_detected || 'Chưa xác định',
+            stage: 'uncontacted',
+            assigned_cskh_name: 'Ngọc Lan (CSKH)',
+            booking_date: null,
+            quoted_amount: null,
+            notes: `Bình luận thủ công. Yêu cầu: ${post.classification?.extra_requirements.join(', ') || 'N/A'}`,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            post_summary: post.content_raw.slice(0, 120),
+          };
+          storeData.leads.unshift(lead);
+        }
+
+        this.writeData(storeData);
+        return { success: true, isManualDone: true, interaction, lead };
+      }
+
+      // CASE B: Playwright Automated Mode - set 'sending' lock
+      const sessionSummary = authManager.getSessionSummary();
+      if (!sessionSummary.exists || !sessionSummary.valid) {
+        return {
+          success: false,
+          needsAuth: true,
+          error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json). Hệ thống từ chối báo thành công giả khi chưa có quyền truy cập thực tế. Vui lòng nạp session trước khi gửi tự động.',
+        };
+      }
+
+      post.interaction = {
         id: `int-${Date.now()}`,
         post_id: postId,
         page_identity: 'Maison MIPA Photography',
-        operator_name: `${operatorName} (Thủ công)`,
-        template_used_id: post.classification?.suggested_template_id || 'manual',
+        operator_name: operatorName,
+        template_used_id: post.classification?.suggested_template_id || 'custom',
         comment_content: commentContent,
-        status: 'manual_assisted',
-        comment_permalink: manualProofUrl || post.post_url,
+        status: 'sending',
         dispatched_at: new Date().toISOString(),
       };
-
-      post.interaction = interaction;
-      if (post.classification) post.classification.review_status = 'approved';
-
-      let lead = storeData.leads.find(l => l.post_id === postId);
-      if (!lead) {
-        lead = {
-          id: `lead-${Date.now()}`,
-          post_id: postId,
-          customer_name: post.author_name,
-          customer_facebook_url: post.post_url,
-          service_interest: post.classification?.service_detected || 'Chưa xác định',
-          stage: 'uncontacted',
-          assigned_cskh_name: 'Ngọc Lan (CSKH)',
-          booking_date: null,
-          quoted_amount: null,
-          notes: `Bình luận thủ công. Yêu cầu: ${post.classification?.extra_requirements.join(', ') || 'N/A'}`,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          post_summary: post.content_raw.slice(0, 120),
-        };
-        storeData.leads.unshift(lead);
-      }
-
       this.writeData(storeData);
-      return { success: true, interaction, lead };
+
+      return { success: true, isManualDone: false, postToDispatch: post };
+    });
+
+    if (!preCheck.success || (preCheck as any).isManualDone) {
+      return preCheck as any;
     }
 
-    // CASE B: Automated Playwright Dispatch
-    const sessionSummary = authManager.getSessionSummary();
-    if (!sessionSummary.exists || !sessionSummary.valid) {
-      return {
-        success: false,
-        needsAuth: true,
-        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json). Hệ thống từ chối báo thành công giả khi chưa có quyền truy cập thực tế. Vui lòng nạp session trước khi gửi tự động.',
-      };
-    }
-
-    // Acquire lock
-    post.interaction = {
-      id: `int-${Date.now()}`,
-      post_id: postId,
-      page_identity: 'Maison MIPA Photography',
-      operator_name: operatorName,
-      template_used_id: post.classification?.suggested_template_id || 'custom',
-      comment_content: commentContent,
-      status: 'sending',
-      dispatched_at: new Date().toISOString(),
-    };
-    this.writeData(storeData);
+    const targetPost = (preCheck as any).postToDispatch as FacebookPost;
 
     // Call real Playwright comment dispatcher
     const dispatchResult = await commentDispatcher.dispatchComment({
-      postId: post.id,
-      postUrl: post.post_url,
+      postId: targetPost.id,
+      postUrl: targetPost.post_url,
       commentContent,
-      pageIdentity: 'Maison MIPA Photography',
+      pageIdentity: 'Maison MIPA',
     });
 
-    const freshData = this.readData();
-    const freshPost = freshData.posts.find(p => p.id === postId) || post;
+    // Phase 2: Lock and update final result
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const currentPost = storeData.posts.find(p => p.id === postId);
+      if (!currentPost) return { success: false, error: 'Bài viết không còn tồn tại.' };
 
-    if (dispatchResult.status === 'sent_confirmed') {
-      const interaction: OutreachInteraction = {
-        id: freshPost.interaction?.id || `int-${Date.now()}`,
-        post_id: postId,
-        page_identity: 'Maison MIPA Photography',
-        operator_name: operatorName,
-        template_used_id: freshPost.classification?.suggested_template_id || 'custom',
-        comment_content: commentContent,
-        status: 'sent_confirmed',
-        comment_facebook_id: dispatchResult.commentFacebookId,
-        comment_permalink: dispatchResult.permalink,
-        dispatched_at: new Date().toISOString(),
-      };
-
-      freshPost.interaction = interaction;
-      if (freshPost.classification) freshPost.classification.review_status = 'approved';
-
-      let lead = freshData.leads.find(l => l.post_id === postId);
-      if (!lead) {
-        lead = {
-          id: `lead-${Date.now()}`,
+      if (dispatchResult.status === 'sent_confirmed') {
+        const interaction: OutreachInteraction = {
+          id: currentPost.interaction?.id || `int-${Date.now()}`,
           post_id: postId,
-          customer_name: freshPost.author_name,
-          customer_facebook_url: freshPost.post_url,
-          service_interest: freshPost.classification?.service_detected || 'Chưa xác định',
-          stage: 'uncontacted',
-          assigned_cskh_name: 'Ngọc Lan (CSKH)',
-          booking_date: null,
-          quoted_amount: null,
-          notes: `Tạo từ tiếp cận tự động. Yêu cầu: ${freshPost.classification?.extra_requirements.join(', ') || 'Không'}`,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          post_summary: freshPost.content_raw.slice(0, 120),
+          comment_facebook_id: dispatchResult.commentFacebookId,
+          comment_permalink: dispatchResult.permalink,
+          page_identity: 'Maison MIPA Photography',
+          operator_name: operatorName,
+          template_used_id: currentPost.classification?.suggested_template_id || 'custom',
+          comment_content: commentContent,
+          status: 'sent_confirmed',
+          dispatched_at: new Date().toISOString(),
         };
-        freshData.leads.unshift(lead);
+
+        currentPost.interaction = interaction;
+        if (currentPost.classification) {
+          currentPost.classification.review_status = 'approved';
+        }
+
+        // Handoff to CRM Pipeline
+        let lead = storeData.leads.find(l => l.post_id === postId);
+        if (!lead) {
+          lead = {
+            id: `lead-${Date.now()}`,
+            post_id: postId,
+            customer_name: currentPost.author_name,
+            customer_facebook_url: currentPost.post_url,
+            service_interest: currentPost.classification?.service_detected || 'Chưa xác định',
+            stage: 'uncontacted',
+            assigned_cskh_name: 'Nguyễn Ngọc Lan (CSKH)',
+            booking_date: currentPost.classification?.shooting_date_suggested || null,
+            quoted_amount: null,
+            notes: `Tiếp cận tự động thành công. Nhu cầu: ${currentPost.classification?.extra_requirements.join(', ') || 'N/A'}. Lịch dự kiến: ${currentPost.classification?.shooting_date_text || 'Chưa rõ'}`,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            post_summary: currentPost.content_raw.slice(0, 120),
+          };
+          storeData.leads.unshift(lead);
+        }
+
+        this.writeData(storeData);
+        return { success: true, interaction, lead };
+      } else {
+        // Mark UNCERTAIN_FAILED
+        const interaction: OutreachInteraction = {
+          id: currentPost.interaction?.id || `int-${Date.now()}`,
+          post_id: postId,
+          page_identity: 'Maison MIPA Photography',
+          operator_name: operatorName,
+          template_used_id: currentPost.classification?.suggested_template_id || 'custom',
+          comment_content: commentContent,
+          status: 'uncertain_failed',
+          dispatched_at: new Date().toISOString(),
+          error_message: dispatchResult.errorMessage,
+        };
+
+        currentPost.interaction = interaction;
+        this.writeData(storeData);
+        return { 
+          success: false, 
+          interaction, 
+          error: dispatchResult.errorMessage || 'Không thể xác thực bình luận trên Facebook.' 
+        };
       }
-
-      this.writeData(freshData);
-      return { success: true, interaction, lead };
-
-    } else if (dispatchResult.status === 'uncertain_failed') {
-      // Mark as UNCERTAIN_FAILED (Do NOT retry blindly)
-      const interaction: OutreachInteraction = {
-        id: freshPost.interaction?.id || `int-${Date.now()}`,
-        post_id: postId,
-        page_identity: 'Maison MIPA Photography',
-        operator_name: operatorName,
-        template_used_id: freshPost.classification?.suggested_template_id || 'custom',
-        comment_content: commentContent,
-        status: 'uncertain_failed',
-        error_message: dispatchResult.errorMessage || 'Mất kết nối trước khi xác nhận được bình luận trên trang.',
-        dispatched_at: new Date().toISOString(),
-      };
-      freshPost.interaction = interaction;
-      this.writeData(freshData);
-
-      return {
-        success: false,
-        error: interaction.error_message,
-        interaction,
-      };
-
-    } else {
-      // Rejected (e.g. checkpoint or no permission)
-      if (freshPost.interaction) {
-        delete freshPost.interaction;
-      }
-      this.writeData(freshData);
-      return {
-        success: false,
-        error: dispatchResult.errorMessage || 'Không thể thực hiện bình luận.',
-      };
-    }
+    });
   }
 
-  // --- CRM Leads ---
+  // --- CRM Leads API ---
   public getLeads(): CRMLead[] {
     return this.readData().leads;
   }
 
-  public addLead(lead: CRMLead): CRMLead {
-    const storeData = this.readData();
-    storeData.leads.unshift(lead);
-    this.writeData(storeData);
-    return lead;
-  }
-
   public updateLead(id: string, updates: Partial<CRMLead>): CRMLead | null {
-    const storeData = this.readData();
-    const idx = storeData.leads.findIndex(l => l.id === id);
-    if (idx === -1) return null;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const idx = storeData.leads.findIndex(l => l.id === id);
+      if (idx === -1) return null;
 
-    // CRITICAL BUG FIX: Strip undefined entries to protect existing notes, quote, booking date, etc.
-    const cleanUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([_, v]) => v !== undefined)
-    );
+      // Filter out undefined to prevent overwriting existing valid values
+      const cleanUpdates = Object.fromEntries(
+        Object.entries(updates).filter(([_, v]) => v !== undefined)
+      );
 
-    storeData.leads[idx] = { 
-      ...storeData.leads[idx], 
-      ...cleanUpdates, 
-      updated_at: new Date().toISOString() 
-    };
-    this.writeData(storeData);
-    return storeData.leads[idx];
+      storeData.leads[idx] = { 
+        ...storeData.leads[idx], 
+        ...cleanUpdates, 
+        updated_at: new Date().toISOString() 
+      };
+      this.writeData(storeData);
+      return storeData.leads[idx];
+    });
   }
 
   // --- Services & Templates ---
@@ -596,15 +701,17 @@ class LeadHubSharedStore {
   }
 
   public updateService(id: string, updates: Partial<ServiceItem>): ServiceItem | null {
-    const storeData = this.readData();
-    const idx = storeData.services.findIndex(s => s.id === id);
-    if (idx === -1) return null;
-    const cleanUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([_, v]) => v !== undefined)
-    );
-    storeData.services[idx] = { ...storeData.services[idx], ...cleanUpdates };
-    this.writeData(storeData);
-    return storeData.services[idx];
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const idx = storeData.services.findIndex(s => s.id === id);
+      if (idx === -1) return null;
+      const cleanUpdates = Object.fromEntries(
+        Object.entries(updates).filter(([_, v]) => v !== undefined)
+      );
+      storeData.services[idx] = { ...storeData.services[idx], ...cleanUpdates };
+      this.writeData(storeData);
+      return storeData.services[idx];
+    });
   }
 
   public getTemplates(): OutreachTemplate[] {
@@ -612,41 +719,70 @@ class LeadHubSharedStore {
   }
 
   public updateTemplate(id: string, updates: Partial<OutreachTemplate>): OutreachTemplate | null {
-    const storeData = this.readData();
-    const idx = storeData.templates.findIndex(t => t.id === id);
-    if (idx === -1) return null;
-    const cleanUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([_, v]) => v !== undefined)
-    );
-    storeData.templates[idx] = { 
-      ...storeData.templates[idx], 
-      ...cleanUpdates,
-      version: storeData.templates[idx].version + 1,
-      updated_at: new Date().toISOString()
-    };
-    this.writeData(storeData);
-    return storeData.templates[idx];
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const idx = storeData.templates.findIndex(t => t.id === id);
+      if (idx === -1) return null;
+      const cleanUpdates = Object.fromEntries(
+        Object.entries(updates).filter(([_, v]) => v !== undefined)
+      );
+      storeData.templates[idx] = { 
+        ...storeData.templates[idx], 
+        ...cleanUpdates, 
+        version: storeData.templates[idx].version + 1,
+        updated_at: new Date().toISOString() 
+      };
+      this.writeData(storeData);
+      return storeData.templates[idx];
+    });
   }
 
-  // --- Heartbeat & Health ---
+  // --- Heartbeat & Health (Strictly Decoupled) ---
   public getHeartbeat(): WorkerHeartbeat {
     const data = this.readData();
     const lastPing = data.heartbeat.last_ping ? new Date(data.heartbeat.last_ping).getTime() : 0;
-    const isFresh = Date.now() - lastPing < 120_000;
+    const isFresh = lastPing > 0 && (Date.now() - lastPing < 120_000);
     data.heartbeat.is_alive = isFresh;
     data.heartbeat.facebook_auth_valid = authManager.getSessionSummary().valid;
     return data.heartbeat;
   }
 
+  public updateOperatingMode(mode: 'manual_review' | 'auto_dispatch'): WorkerHeartbeat {
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      storeData.heartbeat.operating_mode = mode;
+      // Do NOT touch last_ping when changing operating mode!
+      this.writeData(storeData);
+      return storeData.heartbeat;
+    });
+  }
+
+  public recordWorkerPing(workerId: string = 'worker-ubuntu-central-01', activeJobs: number = 0): WorkerHeartbeat {
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      storeData.heartbeat = {
+        ...storeData.heartbeat,
+        worker_id: workerId,
+        last_ping: new Date().toISOString(),
+        is_alive: true,
+        active_jobs_count: activeJobs,
+        facebook_auth_valid: authManager.getSessionSummary().valid,
+      };
+      this.writeData(storeData);
+      return storeData.heartbeat;
+    });
+  }
+
   public updateHeartbeat(updates: Partial<WorkerHeartbeat>): WorkerHeartbeat {
-    const storeData = this.readData();
-    storeData.heartbeat = {
-      ...storeData.heartbeat,
-      ...updates,
-      last_ping: new Date().toISOString(),
-    };
-    this.writeData(storeData);
-    return storeData.heartbeat;
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      storeData.heartbeat = {
+        ...storeData.heartbeat,
+        ...updates,
+      };
+      this.writeData(storeData);
+      return storeData.heartbeat;
+    });
   }
 }
 

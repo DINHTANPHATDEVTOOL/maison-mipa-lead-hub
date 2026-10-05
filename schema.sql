@@ -153,6 +153,13 @@ CREATE INDEX IF NOT EXISTS idx_crm_stage_assigned ON crm_leads(stage, assigned_c
 -- ==============================================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES
 -- ==============================================================================
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN
+        CREATE ROLE authenticated;
+    END IF;
+END $$;
+
 ALTER TABLE facebook_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach_templates ENABLE ROW LEVEL SECURITY;

@@ -5,7 +5,8 @@ export interface DispatchCommentParams {
   postId: string;
   postUrl: string;
   commentContent: string;
-  pageIdentity: string;
+  pageIdentity?: string; // Default: 'Maison MIPA'
+  lookbackTimeoutMs?: number;
 }
 
 export interface DispatchCommentResult {
@@ -16,20 +17,15 @@ export interface DispatchCommentResult {
 }
 
 export class FacebookCommentDispatcher {
-  private headless: boolean;
-
-  constructor(headless: boolean = true) {
-    this.headless = process.env.PLAYWRIGHT_HEADLESS !== 'false' && headless;
-  }
-
+  /**
+   * Dispatch an outreach comment using real Playwright browser automation
+   */
   public async dispatchComment(params: DispatchCommentParams): Promise<DispatchCommentResult> {
-    const sessionPath = authManager.getSessionPath();
-
-    // STRICT CHECK: Reject immediately if no valid session exists! NEVER FAKE SUCCESS!
-    if (!sessionPath) {
+    const sessionSummary = authManager.getSessionSummary();
+    if (!sessionSummary.exists || !sessionSummary.valid) {
       return {
         status: 'rejected',
-        errorMessage: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json). Không thể thực hiện bình luận tự động khi chưa được cấp quyền.',
+        errorMessage: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState). Hệ thống từ chối báo thành công giả khi chưa có quyền truy cập thực tế.',
       };
     }
 
@@ -38,35 +34,44 @@ export class FacebookCommentDispatcher {
 
     try {
       browser = await chromium.launch({
-        headless: this.headless,
+        headless: process.env.PLAYWRIGHT_HEADLESS !== 'false',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-blink-features=AutomationControlled',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu',
         ],
       });
 
       context = await browser.newContext({
-        storageState: sessionPath,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        storageState: authManager.getStorageStatePath(),
+        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 },
+        locale: 'vi-VN',
+        timezoneId: 'Asia/Ho_Chi_Minh',
       });
 
-      const page: Page = await context.newPage();
-      console.log(`[Dispatcher] Mở bài viết để gửi bình luận: ${params.postUrl}`);
+      const page = await context.newPage();
 
-      const response = await page.goto(params.postUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      if (!response || response.status() >= 400) {
-        return {
-          status: 'rejected',
-          errorMessage: `Không thể mở bài viết Facebook (HTTP ${response?.status() || 'Timeout'})`,
-        };
-      }
+      // Navigate to target post permalink
+      console.log(`[Dispatcher] Điều hướng tới bài viết Facebook: ${params.postUrl}`);
+      await page.goto(params.postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      // Check session expiration or checkpoint
-      const currentUrl = page.url();
-      if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint') || currentUrl.includes('two_factor')) {
+      // Check checkpoint / login prompt
+      const isLoggedOut = await page.evaluate(() => {
+        return !!(
+          document.querySelector('input[name="email"]') ||
+          document.querySelector('input[name="pass"]') ||
+          document.body.innerText.includes('Đăng nhập Facebook') ||
+          document.body.innerText.includes('Checkpoint') ||
+          document.body.innerText.includes('Bạn phải đăng nhập để tiếp tục')
+        );
+      });
+
+      if (isLoggedOut) {
         return {
           status: 'rejected',
           errorMessage: 'Mất phiên đăng nhập Facebook hoặc bị Meta yêu cầu checkpoint xác minh danh tính.',
@@ -75,16 +80,15 @@ export class FacebookCommentDispatcher {
 
       await page.waitForTimeout(2500);
 
-      // STEP 1: Verify & Switch Identity to Page
-      if (params.pageIdentity) {
-        console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${params.pageIdentity}"`);
-        const identityResult = await this.verifyAndSwitchPageIdentity(page, params.pageIdentity);
-        if (!identityResult.matched) {
-          return {
-            status: 'rejected',
-            errorMessage: identityResult.error || `Không thể xác nhận hoặc chuyển đổi danh tính sang Page "${params.pageIdentity}".`,
-          };
-        }
+      // STEP 1: Verify & Switch Identity to Page (Maison MIPA)
+      const targetPageName = params.pageIdentity || 'Maison MIPA';
+      console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${targetPageName}"`);
+      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName);
+      if (!identityResult.matched) {
+        return {
+          status: 'rejected',
+          errorMessage: identityResult.error || `Từ chối gửi bình luận: Chưa xác thực được danh tính Page "${targetPageName}". Không được phép gửi bằng tài khoản cá nhân.`,
+        };
       }
 
       // STEP 2: Locate Comment Box
@@ -107,11 +111,10 @@ export class FacebookCommentDispatcher {
       await page.keyboard.press('Enter');
 
       // STEP 4: STRICT DOM CONFIRMATION
-      // Do NOT search document.body.innerText broadly!
       // Look specifically inside comment containers for the comment snippet and matching author.
       const snippetToSearch = params.commentContent.slice(0, 35);
       const startTime = Date.now();
-      let confirmedComment: { found: boolean; commentId?: string; commentPermalink?: string } = { found: false };
+      let confirmedComment: { found: boolean; commentId?: string; commentPermalink?: string; authorMatches?: boolean } = { found: false };
 
       while (Date.now() - startTime < 16000) {
         await page.waitForTimeout(1500);
@@ -125,10 +128,10 @@ export class FacebookCommentDispatcher {
           for (const el of Array.from(commentElements)) {
             const text = (el.textContent || '').trim();
             if (text.includes(snippet)) {
-              // Check if author matches target identity if present
+              // Check if author matches target identity
               const authorEl = el.querySelector('a[role="link"] span, h3, h4, span.x193iq5w');
               const authorText = (authorEl?.textContent || '').trim();
-              const authorMatches = !targetIdentity || authorText.toLowerCase().includes(targetIdentity.toLowerCase());
+              const authorMatches = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
 
               // Extract real comment ID and permalink if link is present
               const permalinkAnchor = el.querySelector('a[href*="comment_id="]') as HTMLAnchorElement | null;
@@ -150,15 +153,16 @@ export class FacebookCommentDispatcher {
             }
           }
 
-          return { found: false };
-        }, { snippet: snippetToSearch, targetIdentity: params.pageIdentity });
+          return { found: false, authorMatches: false };
+        }, { snippet: snippetToSearch, targetIdentity: targetPageName });
 
-        if (confirmedComment.found) {
+        if (confirmedComment.found && confirmedComment.authorMatches) {
           break;
         }
       }
 
-      if (confirmedComment.found) {
+      // CRITICAL FIX: Only confirm if BOTH comment text was found AND author matched our Page!
+      if (confirmedComment.found && confirmedComment.authorMatches) {
         const finalPermalink = confirmedComment.commentPermalink ||
           (confirmedComment.commentId ? `${params.postUrl}?comment_id=${confirmedComment.commentId}` : params.postUrl);
 
@@ -168,11 +172,15 @@ export class FacebookCommentDispatcher {
           permalink: finalPermalink,
         };
       } else {
-        // Did not confirm presence inside comments list within timeout
+        // Did not confirm presence inside comments list with matching author within timeout
         // Mark UNCERTAIN_FAILED to protect against duplicate posting!
+        const reason = confirmedComment.found && !confirmedComment.authorMatches
+          ? `Bình luận tương tự được phát hiện nhưng tác giả không khớp Page "${targetPageName}". Không xác nhận thành công để tránh nhầm lẫn với bình luận của người khác.`
+          : `Đã nhấn phím Enter gửi bình luận nhưng sau 16 giây chưa thấy bài xuất hiện dưới tên Page "${targetPageName}". Đánh dấu "Chưa xác định kết quả" để chống gửi lặp.`;
+
         return {
           status: 'uncertain_failed',
-          errorMessage: 'Đã nhấn phím Enter gửi bình luận nhưng sau 16 giây chưa thấy bài xuất hiện trong danh sách bình luận trên Facebook. Đánh dấu "Chưa xác định kết quả" để chống gửi lặp.',
+          errorMessage: reason,
         };
       }
 
@@ -191,7 +199,7 @@ export class FacebookCommentDispatcher {
   /**
    * Helper to check and switch Facebook commenting voice / identity
    */
-  private async verifyAndSwitchPageIdentity(page: Page, targetIdentity: string): Promise<{ matched: boolean; error?: string }> {
+  public async verifyAndSwitchPageIdentity(page: Page, targetIdentity: string): Promise<{ matched: boolean; error?: string }> {
     try {
       // Look for the identity switcher button near comment box or post
       const switcher = await page.$(
@@ -208,9 +216,13 @@ export class FacebookCommentDispatcher {
         if (currentVoice && currentVoice.toLowerCase().includes(targetIdentity.toLowerCase())) {
           return { matched: true };
         }
-        // In some groups without voice switcher, commenting defaults to user profile
-        console.log(`[Dispatcher] Không tìm thấy nút chuyển đổi danh tính, tiếp tục kiểm tra quyền bình luận.`);
-        return { matched: true };
+
+        // CRITICAL FIX: If no switcher is found and profile does not match target Page,
+        // strictly refuse to proceed with personal profile!
+        return {
+          matched: false,
+          error: `Không tìm thấy nút chuyển đổi danh tính và tài khoản hiện tại không mang tên Page "${targetIdentity}". Từ chối bình luận bằng tài khoản cá nhân.`,
+        };
       }
 
       // Check current switcher text
@@ -245,7 +257,10 @@ export class FacebookCommentDispatcher {
       };
     } catch (e: any) {
       console.warn(`[Dispatcher] Lỗi khi kiểm tra/chuyển đổi vai trò: ${e.message}`);
-      return { matched: true }; // Proceed to attempt comment
+      return {
+        matched: false,
+        error: `Lỗi khi kiểm tra vai trò bình luận: ${e.message}. Từ chối bình luận để tránh nhầm lẫn danh tính.`,
+      };
     }
   }
 }

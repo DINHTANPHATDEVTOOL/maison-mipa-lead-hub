@@ -1,8 +1,18 @@
 import { NextResponse } from 'next/server';
 import { store } from '@/lib/store';
 import { classifyPostContent } from '@/lib/classifier';
+import { verifyAuth } from '@/lib/auth';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET(req: Request) {
+  // Authentication check: Staff only (admin, marketing, cskh)
+  const auth = verifyAuth(req, ['admin', 'marketing', 'cskh']);
+  if (!auth.success) {
+    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  }
+
   const { searchParams } = new URL(req.url);
   const intent = searchParams.get('intent');
   const reviewStatus = searchParams.get('review_status');
@@ -27,6 +37,12 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    // Authentication check: Admin and Marketing only
+    const auth = verifyAuth(req, ['admin', 'marketing']);
+    if (!auth.success) {
+      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    }
+
     const body = await req.json();
     if (!body.content_raw) {
       return NextResponse.json({ success: false, error: 'Nội dung bài viết là bắt buộc' }, { status: 400 });
@@ -41,13 +57,15 @@ export async function POST(req: Request) {
       post_url: body.post_url || `https://facebook.com/groups/manual/posts/${Date.now()}`,
       author_name: body.author_name || 'Khách hàng vãng lai',
       content_raw: body.content_raw,
+      posted_at: body.posted_at || new Date().toISOString(),
     });
 
     if (isNew) {
       const services = store.getServices();
       const templates = store.getTemplates();
-      const classification = classifyPostContent(post.content_raw, services, templates);
-      post.classification = {
+      const classification = classifyPostContent(post.content_raw, services, templates, post.posted_at);
+      
+      const classificationData = {
         id: `cls-${Date.now()}`,
         post_id: post.id,
         intent: classification.intent,
@@ -62,8 +80,12 @@ export async function POST(req: Request) {
         classification_reason: classification.classification_reason,
         suggested_template_id: classification.suggested_template_id,
         suggested_comment_text: classification.suggested_comment_text,
-        review_status: classification.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
+        review_status: (classification.intent === 'looking_for_service' ? 'pending_review' : 'dismissed') as any,
       };
+
+      // CRITICAL FIX: Persist classification to store and disk
+      store.updatePostClassification(post.id, classificationData);
+      post.classification = classificationData;
     }
 
     return NextResponse.json({ success: true, isNew, data: post });
