@@ -51,14 +51,26 @@ export function getDbPool(): Pool {
     implementation: () => require('crypto').randomUUID(),
   });
 
-  const migrationPath = path.join(process.cwd(), 'src', 'lib', 'db', 'migrations', '001_initial_schema.sql');
-  if (fs.existsSync(migrationPath)) {
-    let sql = fs.readFileSync(migrationPath, 'utf-8');
-    sql = sql.replace(/CREATE EXTENSION IF NOT EXISTS [^;]+;/g, '');
-    db.public.none(sql);
-    try {
-      db.public.none(`INSERT INTO schema_migrations (version, name) VALUES (1, 'initial_schema') ON CONFLICT DO NOTHING;`);
-    } catch {}
+  const migrationsDir = path.join(process.cwd(), 'src', 'lib', 'db', 'migrations');
+  if (fs.existsSync(migrationsDir)) {
+    const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+    for (const file of files) {
+      let sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+      sql = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      const statements = sql.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
+      for (const stmt of statements) {
+        if (stmt.toLowerCase().startsWith('create extension')) continue;
+        try {
+          db.public.none(stmt);
+        } catch {}
+      }
+      const match = file.match(/^(\d+)_(.+)\.sql$/);
+      if (match) {
+        try {
+          db.public.none(`INSERT INTO schema_migrations (version, name) VALUES (${parseInt(match[1], 10)}, '${match[2]}') ON CONFLICT DO NOTHING;`);
+        } catch {}
+      }
+    }
   }
 
   const adapter = db.adapters.createPg();

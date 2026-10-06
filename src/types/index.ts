@@ -17,9 +17,11 @@ export type PostReviewStatus =
 
 export type OutreachStatus = 
   | 'not_started' 
+  | 'queued'
   | 'sending' 
   | 'sent_confirmed' 
   | 'uncertain_failed' 
+  | 'failed_before_submit'
   | 'manual_assisted'
   | 'failed'
   | 'rejected';

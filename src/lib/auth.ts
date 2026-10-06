@@ -159,12 +159,8 @@ export async function revokeTokenAsync(token: string): Promise<void> {
   if (!token || typeof token !== 'string') return;
   const t = token.trim();
   if (!t) return;
-  try {
-    const { authRepo } = await import('./repositories/auth.repository');
-    await authRepo.revokeToken(t);
-  } catch (err: any) {
-    console.warn('[Auth] Không thể ghi revoked token vào database:', err?.message);
-  }
+  const { authRepo } = await import('./repositories/auth.repository');
+  await authRepo.revokeToken(t);
 }
 
 export function isTokenRevoked(token: string): boolean {
@@ -201,14 +197,12 @@ export function isTokenRevoked(token: string): boolean {
 
 export async function isTokenRevokedAsync(token: string): Promise<boolean> {
   if (isTokenRevoked(token)) return true;
-  try {
-    const { authRepo } = await import('./repositories/auth.repository');
-    const inDb = await authRepo.isTokenRevoked(token);
-    if (inDb) {
-      REVOKED_TOKENS.add(token.trim());
-      return true;
-    }
-  } catch {}
+  const { authRepo } = await import('./repositories/auth.repository');
+  const inDb = await authRepo.isTokenRevoked(token);
+  if (inDb) {
+    REVOKED_TOKENS.add(token.trim());
+    return true;
+  }
   return false;
 }
 
@@ -346,12 +340,20 @@ export async function verifyAuth(req: Request, allowedRoles?: UserRole[]): Promi
   }
 
   // 3. Cryptographically verify signed token & check DB/disk revocation
-  const isRevoked = await isTokenRevokedAsync(token);
-  if (isRevoked) {
+  try {
+    const isRevoked = await isTokenRevokedAsync(token);
+    if (isRevoked) {
+      return {
+        success: false,
+        error: 'Phiên làm việc đã bị thu hồi (đã đăng xuất). Vui lòng đăng nhập lại.',
+        status: 401,
+      };
+    }
+  } catch (dbErr: any) {
     return {
       success: false,
-      error: 'Phiên làm việc đã bị thu hồi (đã đăng xuất). Vui lòng đăng nhập lại.',
-      status: 401,
+      error: 'Không thể xác thực trạng thái phiên làm việc do lỗi dịch vụ cơ sở dữ liệu. Vui lòng thử lại sau.',
+      status: 503,
     };
   }
 

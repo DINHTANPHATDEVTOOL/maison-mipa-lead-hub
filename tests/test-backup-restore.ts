@@ -78,29 +78,42 @@ async function runBackupRestoreTest() {
     console.log('\n[*] Bước 3: Kiểm tra cấu trúc nội dung tệp JSON sao lưu...');
     const rawContent = fs.readFileSync(testBackupFile, 'utf-8');
     const parsedData = JSON.parse(rawContent);
-    assert(Array.isArray(parsedData['facebook_posts']), 'Bảng facebook_posts trong JSON phải là mảng');
-    const backedPost = parsedData['facebook_posts'].find((p: any) => p.id === post.id);
+    const tablesMap = parsedData.tables || parsedData;
+    assert(Array.isArray(tablesMap['facebook_posts']), 'Bảng facebook_posts trong JSON phải là mảng');
+    const backedPost = tablesMap['facebook_posts'].find((p: any) => p.id === post.id);
     assert(backedPost !== undefined, 'Bài viết tạo ở bước 1 phải có trong tệp sao lưu');
     assert(backedPost.author_name === 'Khách Test Backup', 'Tên tác giả phải khớp chính xác');
     console.log('  ✓ [PASS] Tệp sao lưu bảo toàn chính xác dữ liệu bài viết và trường liên quan.');
 
-    // 4. Perform Restore
-    console.log('\n[*] Bước 4: Thực thi phục hồi từ tệp sao lưu...');
-    const restoreResult = await restoreDatabase(testBackupFile);
-    assert(restoreResult.restoredRecords >= 0, 'Phục hồi phải hoàn tất thành công');
-    console.log('  ✓ [PASS] Phục hồi hoàn tất không xảy ra lỗi xung đột quan hệ.');
+    // 4. Modify data after backup to test true disaster/change restoration
+    console.log('\n[*] Bước 4: Sửa đổi dữ liệu sau khi sao lưu để kiểm tra khả năng phục hồi thay thế...');
+    await pool.query('UPDATE facebook_groups SET name = $1 WHERE id = $2', ['Changed after backup', group.id]);
+    await pool.query('UPDATE facebook_posts SET author_name = $1 WHERE id = $2', ['Tên bị sửa sau backup', post.id]);
 
-    // 5. Verify Database Content Post-Restore
-    console.log('\n[*] Bước 5: Kiểm tra tính toàn vẹn quan hệ sau phục hồi...');
+    const checkChanged = await groupRepo.getById(group.id);
+    assert.strictEqual(checkChanged?.name, 'Changed after backup', 'Dữ liệu phải được sửa thành công trước khi restore');
+
+    // 5. Perform Restore
+    console.log('\n[*] Bước 5: Thực thi phục hồi từ tệp sao lưu...');
+    const restoreResult = await restoreDatabase(testBackupFile);
+    assert(restoreResult.restoredRecords > 0, 'Phục hồi phải khôi phục các bản ghi đã thay đổi');
+    console.log(`  ✓ [PASS] Phục hồi hoàn tất: đã cập nhật ${restoreResult.restoredRecords} bản ghi.`);
+
+    // 6. Verify Database Content Post-Restore
+    console.log('\n[*] Bước 6: Kiểm tra tính toàn vẹn quan hệ và hoàn nguyên dữ liệu sau phục hồi...');
+    const fetchedGroup = await groupRepo.getById(group.id);
+    assert.strictEqual(fetchedGroup?.name, 'Nhóm Test Backup Restore', 'Tên nhóm phải được phục hồi về nguyên trạng lúc sao lưu');
+
     const fetchedLead = await leadRepo.getById(lead.id);
     assert(fetchedLead !== null, 'Lead phải tồn tại sau khi phục hồi');
     assert(fetchedLead?.customer_name === 'Khách Test Backup', 'Dữ liệu khách hàng phải toàn vẹn');
 
     const fetchedPost = await postRepo.getById(post.id);
     assert(fetchedPost !== null, 'Bài viết liên kết phải tồn tại sau khi phục hồi');
+    assert.strictEqual(fetchedPost?.author_name, 'Khách Test Backup', 'Tên tác giả bài viết phải được hoàn nguyên về nguyên trạng lúc sao lưu');
     assert(fetchedPost?.id === fetchedLead?.post_id, 'Khóa ngoại post_id giữa Lead và Post phải khớp chính xác');
 
-    console.log('  ✓ [PASS] Dữ liệu quan hệ giữa CRM Lead và Bài viết được bảo toàn tuyệt đối.');
+    console.log('  ✓ [PASS] Dữ liệu quan hệ giữa CRM Lead và Bài viết được bảo toàn và hoàn nguyên tuyệt đối.');
 
     console.log('\n======================================================================');
     console.log('✓ TẤT CẢ KIỂM THỬ SAO LƯU & PHỤC HỒI ĐẠT 100%!');

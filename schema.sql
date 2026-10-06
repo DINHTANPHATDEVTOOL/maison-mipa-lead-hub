@@ -219,10 +219,18 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     max_attempts INT NOT NULL DEFAULT 5,
     last_error TEXT,
     payload JSONB DEFAULT '{}'::jsonb,
+    claim_token VARCHAR(64),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_status ON scheduled_jobs(status, run_at);
+
+-- 13b. Page Concurrency Locks
+CREATE TABLE IF NOT EXISTS page_locks (
+    page_id VARCHAR(64) PRIMARY KEY,
+    locked_by VARCHAR(100),
+    locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- 14. Audit Events (Kiểm toán bảo mật hành động nhân viên)
 CREATE TABLE IF NOT EXISTS audit_events (

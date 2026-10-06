@@ -34,55 +34,26 @@ export async function POST(
       }, { status: 400 });
     }
 
-    // 2. Trigger REAL Playwright crawl
-    console.log(`[Manual Trigger] Bắt đầu quét thực tế nhóm: ${group.name} (${group.url})`);
-    const crawlResult = await groupCrawler.crawlGroup(group.url, group.lookback_hours);
-
-    if (!crawlResult.success) {
-      await groupRepo.updateStatus(
-        group.id,
-        crawlResult.needsAuth ? 'needs_auth' : 'error',
-        crawlResult.error || 'Lỗi khi quét nhóm'
-      );
-      return NextResponse.json({
-        success: false,
-        error: crawlResult.error || 'Không thể cào dữ liệu từ nhóm Facebook này.',
-        needsAuth: crawlResult.needsAuth,
-      }, { status: 400 });
-    }
-
-    // 3. Ingest & Classify crawled posts into PostgreSQL
-    let newCount = 0;
-
-    for (const rawPost of crawlResult.posts) {
-      const { isNew } = await postRepo.createIfNew({
-        group_id: group.id,
-        group_name: group.name,
-        facebook_post_id: rawPost.facebook_post_id,
-        post_url: rawPost.post_url,
-        author_name: rawPost.author_name,
-        content_raw: rawPost.content_raw,
-        posted_at: rawPost.posted_at,
-      });
-
-      if (isNew) {
-        newCount++;
-      }
-    }
-
-    // 4. Update group check timestamps and status in PostgreSQL
-    const now = new Date();
-    const nextCheck = new Date(now.getTime() + (group.check_interval_seconds || 150) * 1000);
-    await groupRepo.updateCheckTimestamps(group.id, now, nextCheck, crawlResult.posts.length);
-    const updatedGroup = await groupRepo.updateStatus(group.id, 'active');
+    // 2. Enqueue persistent crawl job for Background Worker (Playwright container)
+    const { jobRepo } = await import('@/lib/repositories/job.repository');
+    const job = await jobRepo.createJob({
+      id: `crawl_${group.id}`,
+      job_type: 'crawl_group',
+      target_id: group.id,
+      payload: {
+        lookback_hours: group.lookback_hours,
+        manual_trigger: true,
+      },
+    });
 
     return NextResponse.json({
       success: true,
-      message: `Đã quét thực tế nhóm "${group.name}". Phát hiện ${newCount} bài viết mới trong ${crawlResult.posts.length} bài trên trang.`,
-      group: updatedGroup,
-      postsFound: crawlResult.posts.length,
-      newPostsCount: newCount,
+      message: `Đã đưa nhóm "${group.name}" vào hàng đợi quét của Background Worker.`,
+      job_id: job.id,
+      status: 'queued',
     });
+
+
 
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });

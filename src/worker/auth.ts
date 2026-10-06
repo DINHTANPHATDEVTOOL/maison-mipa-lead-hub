@@ -69,6 +69,34 @@ export class FacebookAuthManager {
     return null;
   }
 
+  public getStorageState(): { cookies: any[]; origins?: any[] } | null {
+    if (fs.existsSync(ENCRYPTED_SESSION_FILE)) {
+      const decrypted = this.decryptSession();
+      if (decrypted) {
+        try {
+          const parsed = JSON.parse(decrypted);
+          if (parsed && Array.isArray(parsed.cookies)) {
+            const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
+            const hasXs = parsed.cookies.some((c: any) => c.name === 'xs');
+            if (hasCUser && hasXs) return parsed;
+          }
+        } catch {}
+      }
+    }
+    if (fs.existsSync(SESSION_FILE)) {
+      try {
+        const raw = fs.readFileSync(SESSION_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.cookies)) {
+          const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
+          const hasXs = parsed.cookies.some((c: any) => c.name === 'xs');
+          if (hasCUser && hasXs) return parsed;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
   public saveSession(storageStateJson: string): { success: boolean; error?: string } {
     try {
       const parsed = JSON.parse(storageStateJson);
@@ -94,8 +122,10 @@ export class FacebookAuthManager {
       const payload = Buffer.concat([iv, tag, encrypted]);
       fs.writeFileSync(ENCRYPTED_SESSION_FILE, payload, { mode: 0o600 });
 
-      // Save plaintext copy with restricted permissions (0o600) for Playwright runner
-      fs.writeFileSync(SESSION_FILE, storageStateJson, { encoding: 'utf-8', mode: 0o600 });
+      // Clean up any plaintext session file on disk to prevent plaintext leakage
+      if (fs.existsSync(SESSION_FILE)) {
+        try { fs.unlinkSync(SESSION_FILE); } catch {}
+      }
 
       return { success: true };
     } catch (err: any) {

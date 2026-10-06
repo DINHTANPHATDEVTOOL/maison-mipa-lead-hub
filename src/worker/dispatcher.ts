@@ -116,7 +116,8 @@ export class FacebookCommentDispatcher {
    */
   public async dispatchComment(params: DispatchCommentParams): Promise<DispatchCommentResult> {
     const sessionSummary = authManager.getSessionSummary();
-    if (!sessionSummary.exists || !sessionSummary.valid) {
+    const storageState = authManager.getStorageState();
+    if (!sessionSummary.exists || !sessionSummary.valid || !storageState) {
       return {
         success: false,
         status: 'rejected',
@@ -144,7 +145,7 @@ export class FacebookCommentDispatcher {
       });
 
       context = await browser.newContext({
-        storageState: authManager.getStorageStatePath(),
+        storageState: storageState as any,
         userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 },
         locale: 'vi-VN',
@@ -462,8 +463,16 @@ export class FacebookCommentDispatcher {
     try {
       const readActiveVoice = async (): Promise<string | null> => {
         return await page.evaluate(() => {
-          const form = document.querySelector('form[action*="comment"], div[class*="comment_box"], div[role="textbox"]')
-            ?.closest('form, div[class*="UFIContainer"], div[role="presentation"]') || document;
+          // Locate textbox first to strictly bind composer; do not fall back to entire document
+          const textbox = document.querySelector(
+            'div[role="textbox"][contenteditable="true"], form[action*="comment"] [role="textbox"], div[aria-label*="Bình luận"], div[aria-label*="comment"], div[contenteditable="true"]'
+          );
+          if (!textbox) {
+            return null;
+          }
+
+          const form = textbox.closest('form, div[class*="UFIContainer"], div[role="presentation"], div[class*="comments"]') || textbox.parentElement;
+          if (!form) return null;
 
           let altText = '';
           const avatarImg = form.querySelector('img[alt*="avatar"], img[alt*="ảnh đại diện"], div[role="button"] img');
@@ -474,8 +483,6 @@ export class FacebookCommentDispatcher {
           let switcherText = '';
           const switcherEl = form.querySelector(
             'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"], div[role="button"][aria-label*="danh nghĩa"]'
-          ) || document.querySelector(
-            'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
           );
           if (switcherEl) {
             switcherText = switcherEl.getAttribute('aria-label') || switcherEl.textContent || '';
@@ -513,7 +520,7 @@ export class FacebookCommentDispatcher {
             conflicts: [],
             rawText: '',
           };
-          return { matched: false, structured: emptyStructured, error: 'Không thể đọc danh tính người bình luận từ DOM.' };
+          return { matched: false, structured: emptyStructured, error: 'Không thể định vị vùng soạn thảo hoặc đọc danh tính người bình luận từ DOM.' };
         }
 
         const structured = parseStructuredIdentity(voice, targetPageId);
@@ -579,7 +586,7 @@ export class FacebookCommentDispatcher {
           return { matched: true, structured };
         }
 
-        // 2. Name-only matching (when no targetPageId is required)
+        // 4. Name-only matching (when no targetPageId is required)
         if (vLower.includes(tLower)) {
           return { matched: true, structured };
         }
@@ -602,7 +609,7 @@ export class FacebookCommentDispatcher {
         };
       }
 
-      // Locate the switcher button
+      // Locate the switcher button within the page/composer
       const switcher = await page.$(
         'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
       );
@@ -613,16 +620,6 @@ export class FacebookCommentDispatcher {
           activeIdentity: initialVoice || undefined,
           structuredIdentity: initialMatch.structured,
           error: initialMatch.error || `Không tìm thấy nút chuyển đổi danh tính và danh tính hiện tại không khớp Page "${targetIdentity}".`,
-        };
-      }
-
-      const switcherText = (await switcher.textContent()) || (await switcher.getAttribute('aria-label')) || '';
-      const switcherMatch = checkIdentityMatch(switcherText);
-      if (switcherMatch.matched) {
-        return {
-          matched: true,
-          activeIdentity: switcherText,
-          structuredIdentity: switcherMatch.structured,
         };
       }
 
@@ -665,33 +662,25 @@ export class FacebookCommentDispatcher {
         };
       }
 
-      // Wait for DOM re-render and re-verify the active commenting identity
-      await page.waitForTimeout(1500);
+      // Wait for DOM re-render and re-verify the active commenting identity strictly through composer evidence
+      await page.waitForTimeout(1000);
 
       const postSwitchVoice = await readActiveVoice();
-      const currentSwitcher = await page.$(
-        'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
-      );
-      const postSwitcherText = currentSwitcher
-        ? ((await currentSwitcher.textContent()) || (await currentSwitcher.getAttribute('aria-label')) || '')
-        : '';
-
       const postMatchVoice = checkIdentityMatch(postSwitchVoice);
-      const postMatchSwitcher = checkIdentityMatch(postSwitcherText);
 
-      if (postMatchVoice.matched || postMatchSwitcher.matched) {
+      if (postMatchVoice.matched) {
         return {
           matched: true,
-          activeIdentity: postSwitchVoice || postSwitcherText || targetIdentity,
-          structuredIdentity: postMatchVoice.structured || postMatchSwitcher.structured,
+          activeIdentity: postSwitchVoice || targetIdentity,
+          structuredIdentity: postMatchVoice.structured,
         };
       }
 
       return {
         matched: false,
-        activeIdentity: postSwitchVoice || postSwitcherText || undefined,
-        structuredIdentity: postMatchVoice.structured || postMatchSwitcher.structured,
-        error: `Đã chọn Page "${targetIdentity}", nhưng sau khi chuyển, danh tính hoạt động trong DOM ghi nhận là "${postSwitchVoice || postSwitcherText || 'tài khoản cá nhân'}". Từ chối gửi bình luận để bảo đảm không dùng tài khoản cá nhân.`,
+        activeIdentity: postSwitchVoice || undefined,
+        structuredIdentity: postMatchVoice.structured,
+        error: postMatchVoice.error || `Đã chọn Page "${targetIdentity}", nhưng sau khi chuyển, danh tính hoạt động trong DOM ghi nhận là "${postSwitchVoice || 'tài khoản cá nhân'}". Từ chối gửi bình luận để bảo đảm an toàn.`,
       };
     } catch (e: any) {
       console.warn(`[Dispatcher] Lỗi khi kiểm tra/chuyển đổi vai trò: ${e.message}`);

@@ -75,10 +75,15 @@ async function executeCrawlJob(groupId: string): Promise<number> {
   if (!crawlResult.success) {
     if (crawlResult.needsAuth) {
       await groupRepo.updateStatus(group.id, 'needs_auth', crawlResult.error || 'Yêu cầu đăng nhập Facebook lại');
+      throw new Error(`needs_auth: ${crawlResult.error || 'Yêu cầu đăng nhập Facebook lại'}`);
+    } else if (crawlResult.error?.includes('không tồn tại') || crawlResult.error?.includes('cấm truy cập') || crawlResult.error?.includes('permission')) {
+      await groupRepo.updateStatus(group.id, 'error', crawlResult.error || 'Lỗi nhóm không thể truy cập');
+      throw new Error(`permanent_error: ${crawlResult.error || 'Lỗi nhóm không thể truy cập'}`);
     } else {
-      await groupRepo.updateStatus(group.id, 'error', crawlResult.error || 'Lỗi quét nhóm');
+      // Transient network or navigation error: keep group active so next cycle continues!
+      console.warn(`[Worker] Lỗi mạng tạm thời khi quét nhóm ${group.id}: ${crawlResult.error}. Giữ nhóm active để quét tiếp.`);
+      throw new Error(`transient_crawl_error: ${crawlResult.error || 'Lỗi mạng tạm thời khi quét'}`);
     }
-    return 0;
   }
 
   let newPostsCount = 0;
@@ -152,7 +157,7 @@ async function processWorkerTick() {
       try {
         if (job.job_type === 'crawl_group' && job.target_id) {
           const newCount = await executeCrawlJob(job.target_id);
-          await jobRepo.completeJob(job.id, { postsFound: newCount });
+          await jobRepo.completeJob(job.id, { postsFound: newCount }, { claimToken: job.claim_token || undefined, workerId: WORKER_ID });
           console.log(`[Worker] Hoàn thành job ${job.id}: thu thập ${newCount} bài mới.`);
         } else if (job.job_type === 'dispatch_outreach' && job.payload) {
           const payload = typeof job.payload === 'string' ? JSON.parse(job.payload) : job.payload;
@@ -165,17 +170,23 @@ async function processWorkerTick() {
             templateId: payload.templateId,
           });
           if (dispatchRes.success) {
-            await jobRepo.completeJob(job.id, dispatchRes);
+            await jobRepo.completeJob(job.id, dispatchRes, { claimToken: job.claim_token || undefined, workerId: WORKER_ID });
             console.log(`[Worker] Hoàn thành job dispatch ${job.id}`);
           } else {
             throw new Error(dispatchRes.error || 'Thất bại khi dispatch');
           }
         } else {
-          await jobRepo.completeJob(job.id);
+          await jobRepo.completeJob(job.id, undefined, { claimToken: job.claim_token || undefined, workerId: WORKER_ID });
         }
       } catch (jobErr: any) {
         console.error(`[Worker] Lỗi xử lý job ${job.id}:`, jobErr.message);
-        await jobRepo.failJob(job.id, jobErr.message, 60);
+        const isTransient = jobErr.message.includes('transient_crawl_error') || !jobErr.message.includes('permanent_error');
+        const retryDelay = isTransient ? 30 : 300;
+        await jobRepo.failJob(job.id, jobErr.message, {
+          claimToken: job.claim_token || undefined,
+          workerId: WORKER_ID,
+          retryDelaySeconds: retryDelay,
+        });
       } finally {
         activeJobId = null;
       }

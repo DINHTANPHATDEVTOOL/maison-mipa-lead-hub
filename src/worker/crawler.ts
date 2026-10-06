@@ -162,15 +162,15 @@ export class FacebookGroupCrawler {
       };
     }
 
-    const sessionPath = authManager.getSessionPath();
+    const storageState = authManager.getStorageState();
 
     // STRICT CHECK: Reject immediately if no valid session exists. NEVER FAKE DATA!
-    if (!sessionPath) {
+    if (!storageState) {
       return {
         success: false,
         posts: [],
         needsAuth: true,
-        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json). Không thể quét dữ liệu nhóm thực tế.',
+        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json hoặc .enc). Không thể quét dữ liệu nhóm thực tế.',
       };
     }
 
@@ -189,7 +189,7 @@ export class FacebookGroupCrawler {
       });
 
       context = await browser.newContext({
-        storageState: sessionPath,
+        storageState: storageState as any,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 },
       });

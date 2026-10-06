@@ -31,7 +31,12 @@ export async function restoreDatabase(customFilePath?: string): Promise<{ target
 
   console.log(`[*] Đang phục hồi từ tệp: ${targetFile}`);
   const raw = fs.readFileSync(targetFile, 'utf-8');
-  const backupData: Record<string, any[]> = JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  const backupData: Record<string, any[]> = parsed.tables || parsed;
+
+  if (parsed.metadata) {
+    console.log(`[+] Thông tin bản sao lưu: Tạo lúc ${parsed.metadata.timestamp}, Tổng bản ghi: ${parsed.metadata.total_records}`);
+  }
 
   // Restore order respecting foreign keys
   const restoreOrder = [
@@ -87,10 +92,19 @@ export async function restoreDatabase(customFilePath?: string): Promise<{ target
           return val;
         });
         const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-        const columns = keys.join(', ');
-        const conflictClause = conflictTargetMap[table]
-          ? `ON CONFLICT ${conflictTargetMap[table]} DO NOTHING`
-          : (keys.includes('id') ? 'ON CONFLICT (id) DO NOTHING' : 'ON CONFLICT DO NOTHING');
+        const columns = keys.map(k => `"${k}"`).join(', ');
+
+        let conflictClause = '';
+        const target = conflictTargetMap[table] || (keys.includes('id') ? '(id)' : null);
+        if (target) {
+          const targetCols = target.replace(/[()]/g, '').split(',').map(s => s.trim());
+          const updateCols = keys.filter(k => !targetCols.includes(k));
+          if (updateCols.length > 0) {
+            conflictClause = `ON CONFLICT ${target} DO UPDATE SET ${updateCols.map(c => `"${c}" = EXCLUDED."${c}"`).join(', ')}`;
+          } else {
+            conflictClause = `ON CONFLICT ${target} DO NOTHING`;
+          }
+        }
 
         const insertQuery = `
           INSERT INTO ${table} (${columns})

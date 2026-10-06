@@ -1,4 +1,5 @@
 import { getDbPool } from '../db';
+import crypto from 'crypto';
 
 export interface ScheduledJob {
   id: string;
@@ -9,6 +10,7 @@ export interface ScheduledJob {
   run_at: string;
   locked_at: string | null;
   locked_by: string | null;
+  claim_token?: string | null;
   attempts: number;
   max_attempts: number;
   last_error: string | null;
@@ -38,8 +40,14 @@ export class JobRepository {
       ) VALUES ($1, $2, 'pending', $3, $4, $5, $6)
       ON CONFLICT (id) DO UPDATE SET
         job_type = EXCLUDED.job_type,
-        payload = EXCLUDED.payload,
-        run_at = EXCLUDED.run_at,
+        payload = CASE 
+          WHEN scheduled_jobs.status = 'running' THEN scheduled_jobs.payload
+          ELSE EXCLUDED.payload
+        END,
+        run_at = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN EXCLUDED.run_at
+          ELSE scheduled_jobs.run_at
+        END,
         status = CASE 
           WHEN scheduled_jobs.status = 'completed' THEN 'pending'
           ELSE scheduled_jobs.status
@@ -55,6 +63,10 @@ export class JobRepository {
         locked_by = CASE 
           WHEN scheduled_jobs.status = 'completed' THEN NULL
           ELSE scheduled_jobs.locked_by
+        END,
+        claim_token = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          ELSE scheduled_jobs.claim_token
         END,
         last_error = CASE 
           WHEN scheduled_jobs.status = 'completed' THEN NULL
@@ -86,6 +98,7 @@ export class JobRepository {
       SET status = 'pending',
           locked_at = NULL,
           locked_by = NULL,
+          claim_token = NULL,
           updated_at = NOW()
       WHERE status = 'running'
         AND locked_at < NOW() - ($1 || ' minutes')::interval
@@ -95,7 +108,25 @@ export class JobRepository {
   }
 
   /**
-   * Concurrency-safe job claiming using FOR UPDATE SKIP LOCKED inside transaction
+   * Extends / renews the active lease of a running job during long execution
+   */
+  async renewJobLease(id: string, claimToken: string, workerId: string): Promise<boolean> {
+    const pool = getDbPool();
+    const res = await pool.query(
+      `
+      UPDATE scheduled_jobs
+      SET locked_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1 AND claim_token = $2 AND locked_by = $3 AND status = 'running'
+      RETURNING id;
+      `,
+      [id, claimToken, workerId]
+    );
+    return (res.rowCount || 0) > 0;
+  }
+
+  /**
+   * Concurrency-safe job claiming using FOR UPDATE SKIP LOCKED and generation claim_token
    */
   async claimNextJob(workerId: string, supportedTypes?: string[]): Promise<ScheduledJob | null> {
     const { withTransaction } = await import('../db');
@@ -132,20 +163,22 @@ export class JobRepository {
         }
 
         const candidateId = candidateRes.rows[0].id;
+        const claimToken = crypto.randomUUID();
 
-        // 2. Atomic claim with OCC guard: only update if status is still 'pending'
+        // Atomic claim with OCC & claim_token guard: only update if status is still 'pending'
         const updateRes = await client.query(
           `
           UPDATE scheduled_jobs
           SET status = 'running',
               locked_at = NOW(),
               locked_by = $1,
+              claim_token = $3,
               attempts = attempts + 1,
               updated_at = NOW()
           WHERE id = $2 AND status = 'pending'
           RETURNING *;
           `,
-          [workerId, candidateId]
+          [workerId, candidateId, claimToken]
         );
 
         return updateRes.rows[0] || null;
@@ -157,28 +190,64 @@ export class JobRepository {
     return null;
   }
 
-  async completeJob(id: string, _resultPayload?: any): Promise<boolean> {
+  async completeJob(
+    id: string,
+    _resultPayload?: any,
+    leaseOptions?: { claimToken?: string; workerId?: string }
+  ): Promise<boolean> {
     const pool = getDbPool();
+    const { claimToken, workerId } = leaseOptions || {};
+    let whereClause = 'WHERE id = $1';
+    const params: unknown[] = [id];
+
+    if (claimToken && workerId) {
+      whereClause += ' AND claim_token = $2 AND locked_by = $3 AND status = \'running\'';
+      params.push(claimToken, workerId);
+    }
+
     const res = await pool.query(
       `
       UPDATE scheduled_jobs
       SET status = 'completed',
           locked_at = NULL,
           locked_by = NULL,
+          claim_token = NULL,
           updated_at = NOW()
-      WHERE id = $1
+      ${whereClause}
       RETURNING id;
       `,
-      [id]
+      params
     );
     return (res.rowCount || 0) > 0;
   }
 
-  async failJob(id: string, error: string, retryDelaySeconds?: number): Promise<ScheduledJob | null> {
+  async failJob(
+    id: string,
+    error: string,
+    optionsOrDelay?: number | { claimToken?: string; workerId?: string; retryDelaySeconds?: number }
+  ): Promise<ScheduledJob | null> {
     const pool = getDbPool();
+    let claimToken: string | undefined;
+    let workerId: string | undefined;
+    let retryDelaySeconds: number | undefined;
 
-    // Check attempts vs max_attempts
-    const getRes = await pool.query('SELECT attempts, max_attempts FROM scheduled_jobs WHERE id = $1', [id]);
+    if (typeof optionsOrDelay === 'number') {
+      retryDelaySeconds = optionsOrDelay;
+    } else if (optionsOrDelay) {
+      claimToken = optionsOrDelay.claimToken;
+      workerId = optionsOrDelay.workerId;
+      retryDelaySeconds = optionsOrDelay.retryDelaySeconds;
+    }
+
+    // Check attempts vs max_attempts, verifying ownership if token provided
+    let checkQuery = 'SELECT attempts, max_attempts FROM scheduled_jobs WHERE id = $1';
+    const checkParams: unknown[] = [id];
+    if (claimToken && workerId) {
+      checkQuery += ' AND claim_token = $2 AND locked_by = $3 AND status = \'running\'';
+      checkParams.push(claimToken, workerId);
+    }
+
+    const getRes = await pool.query(checkQuery, checkParams);
     if (!getRes.rows[0]) return null;
 
     const { attempts, max_attempts } = getRes.rows[0];
@@ -188,6 +257,13 @@ export class JobRepository {
       ? new Date(Date.now() + (retryDelaySeconds || Math.min(3600, 30 * Math.pow(2, attempts - 1))) * 1000)
       : new Date();
 
+    let updateWhere = 'WHERE id = $1';
+    const updateParams: unknown[] = [id, nextStatus, error, nextRunAt.toISOString()];
+    if (claimToken && workerId) {
+      updateWhere += ' AND claim_token = $5 AND locked_by = $6 AND status = \'running\'';
+      updateParams.push(claimToken, workerId);
+    }
+
     const updateRes = await pool.query(
       `
       UPDATE scheduled_jobs
@@ -195,29 +271,40 @@ export class JobRepository {
           last_error = $3,
           locked_at = NULL,
           locked_by = NULL,
+          claim_token = NULL,
           run_at = $4,
           updated_at = NOW()
-      WHERE id = $1
+      ${updateWhere}
       RETURNING *;
       `,
-      [id, nextStatus, error, nextRunAt.toISOString()]
+      updateParams
     );
 
     return updateRes.rows[0] || null;
   }
 
-  async releaseJob(id: string): Promise<boolean> {
+  async releaseJob(id: string, leaseOptions?: { claimToken?: string; workerId?: string }): Promise<boolean> {
     const pool = getDbPool();
+    const { claimToken, workerId } = leaseOptions || {};
+    let whereClause = 'WHERE id = $1';
+    const params: unknown[] = [id];
+
+    if (claimToken && workerId) {
+      whereClause += ' AND claim_token = $2 AND locked_by = $3 AND status = \'running\'';
+      params.push(claimToken, workerId);
+    }
+
     const res = await pool.query(
       `
       UPDATE scheduled_jobs
       SET status = 'pending',
           locked_at = NULL,
           locked_by = NULL,
+          claim_token = NULL,
           updated_at = NOW()
-      WHERE id = $1;
+      ${whereClause};
       `,
-      [id]
+      params
     );
     return (res.rowCount || 0) > 0;
   }

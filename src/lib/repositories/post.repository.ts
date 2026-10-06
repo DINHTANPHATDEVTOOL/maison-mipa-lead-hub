@@ -140,6 +140,85 @@ export class PostRepository {
     return this.getById(res.rows[0].id);
   }
 
+  public async ensureClassification(existingPost: FacebookPost): Promise<ClassificationResult | undefined> {
+    if (existingPost.classification) {
+      return existingPost.classification as any;
+    }
+    const pool = getDbPool();
+    const checkRes = await pool.query('SELECT * FROM lead_classifications WHERE post_id = $1', [existingPost.id]);
+    if (checkRes.rows.length > 0) {
+      const row = checkRes.rows[0];
+      const clsResult: any = {
+        id: row.id,
+        post_id: row.post_id,
+        intent: row.intent,
+        service_detected: row.service_detected,
+        location: row.location,
+        pax: row.pax,
+        shooting_date_text: row.shooting_date_text,
+        shooting_date_suggested: row.shooting_date_suggested ? new Date(row.shooting_date_suggested).toISOString().split('T')[0] : null,
+        budget_raw: row.budget_raw,
+        extra_requirements: row.extra_requirements ? row.extra_requirements.split(', ') : [],
+        confidence_score: Number(row.confidence_score),
+        classification_reason: row.classification_reason,
+        suggested_template_id: row.suggested_template_id,
+        suggested_comment_text: row.suggested_comment_text,
+        review_status: row.review_status,
+      };
+      existingPost.classification = clsResult;
+      return clsResult;
+    }
+
+    // Auto-heal: Post exists in DB but lacks classification record
+    const services = await serviceRepo.getAll().catch(() => []);
+    const templates = await templateRepo.getAll().catch(() => []);
+    const classification = classifyPostContent(existingPost.content_raw, services, templates, existingPost.posted_at);
+    const safeScore = Math.min(100, Math.max(0, Number(classification.confidence_score) || 0));
+    const extraReqs = Array.isArray(classification.extra_requirements)
+      ? classification.extra_requirements.join(', ')
+      : (typeof classification.extra_requirements === 'string' ? classification.extra_requirements : '');
+    const healedClsId = `cls_${existingPost.id}`;
+
+    await pool.query(`
+      INSERT INTO lead_classifications (
+        id, post_id, intent, service_detected, location, pax, shooting_date_text,
+        shooting_date_suggested, budget_raw, extra_requirements, confidence_score,
+        classification_reason, suggested_template_id, suggested_comment_text, review_status, created_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
+      )
+      ON CONFLICT (post_id) DO NOTHING
+    `, [
+      healedClsId,
+      existingPost.id,
+      classification.intent,
+      classification.service_detected,
+      classification.location,
+      classification.pax,
+      classification.shooting_date_text,
+      classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
+      classification.budget_raw,
+      extraReqs,
+      safeScore,
+      classification.classification_reason,
+      classification.suggested_template_id || null,
+      classification.suggested_comment_text || null,
+      classification.review_status || 'pending',
+    ]);
+
+    existingPost.classification = {
+      ...classification,
+      id: healedClsId,
+      post_id: existingPost.id,
+      extra_requirements: classification.extra_requirements,
+      confidence_score: safeScore,
+      review_status: classification.review_status || 'pending',
+      created_at: new Date().toISOString(),
+    } as any;
+
+    return classification;
+  }
+
   public async createIfNew(postData: {
     id?: string;
     group_id?: string;
@@ -159,7 +238,8 @@ export class PostRepository {
     if (fbPostId) {
       const existing = await this.getByFacebookPostId(fbPostId);
       if (existing) {
-        return { post: existing, isNew: false };
+        const cls = await this.ensureClassification(existing);
+        return { post: existing, isNew: false, classification: cls };
       }
     }
 
@@ -167,7 +247,8 @@ export class PostRepository {
     if (urlHash) {
       const existing = await this.getByUrlHash(urlHash);
       if (existing) {
-        return { post: existing, isNew: false };
+        const cls = await this.ensureClassification(existing);
+        return { post: existing, isNew: false, classification: cls };
       }
     }
 
@@ -213,39 +294,8 @@ export class PostRepository {
         const existingRes = await client.query('SELECT * FROM facebook_posts WHERE post_url_hash = $1', [finalHash]);
         if (existingRes.rows.length > 0) {
           const existingPost = this.mapRow(existingRes.rows[0]);
-
-          // Auto-heal: If classification is missing for this existing post, insert it now
-          const clsCheck = await client.query('SELECT id FROM lead_classifications WHERE post_id = $1', [existingPost.id]);
-          if (clsCheck.rows.length === 0) {
-            const healedClsId = `cls_${existingPost.id}`;
-            await client.query(`
-              INSERT INTO lead_classifications (
-                id, post_id, intent, service_detected, location, pax, shooting_date_text,
-                shooting_date_suggested, budget_raw, extra_requirements, confidence_score,
-                classification_reason, suggested_template_id, suggested_comment_text, review_status, created_at
-              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
-              )
-              ON CONFLICT (post_id) DO NOTHING
-            `, [
-              healedClsId,
-              existingPost.id,
-              classification.intent,
-              classification.service_detected,
-              classification.location,
-              classification.pax,
-              classification.shooting_date_text,
-              classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
-              classification.budget_raw,
-              extraReqs,
-              safeScore,
-              classification.classification_reason,
-              classification.suggested_template_id || null,
-              classification.suggested_comment_text || null,
-              classification.review_status || 'pending',
-            ]);
-          }
-          return { post: existingPost, isNew: false, classification };
+          const cls = await this.ensureClassification(existingPost);
+          return { post: existingPost, isNew: false, classification: cls };
         }
       }
 
@@ -280,7 +330,7 @@ export class PostRepository {
         classification.review_status || 'pending',
       ]);
 
-      return { post: createdPost, isNew: true, classification };
+      return { post: { ...createdPost, classification: classification as any }, isNew: true, classification };
     });
 
     // 5. Automatically create uncontacted CRM Lead if intent matches

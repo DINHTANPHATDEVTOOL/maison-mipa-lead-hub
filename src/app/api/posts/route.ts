@@ -48,13 +48,19 @@ export async function POST(req: Request) {
     }
 
     let targetGroupName = 'Nhập thủ công';
+    let targetGroupId: string | undefined = undefined;
+
     if (body.group_id) {
       const g = await groupRepo.getById(body.group_id);
-      if (g) targetGroupName = g.name;
+      if (!g) {
+        return NextResponse.json({ success: false, error: `Nhóm facebook với id "${body.group_id}" không tồn tại` }, { status: 400 });
+      }
+      targetGroupId = g.id;
+      targetGroupName = g.name;
     }
 
     const { post, isNew } = await postRepo.createIfNew({
-      group_id: body.group_id || 'grp-manual',
+      group_id: targetGroupId,
       group_name: targetGroupName,
       post_url: body.post_url || `https://facebook.com/groups/manual/posts/${Date.now()}`,
       author_name: body.author_name || 'Khách hàng vãng lai',
@@ -64,7 +70,7 @@ export async function POST(req: Request) {
 
     if (process.env.NODE_ENV !== 'production') {
       store.addPostIfNew({
-        group_id: body.group_id || 'grp-manual',
+        group_id: targetGroupId || 'grp-manual',
         group_name: targetGroupName,
         post_url: body.post_url || `https://facebook.com/groups/manual/posts/${Date.now()}`,
         author_name: body.author_name || 'Khách hàng vãng lai',

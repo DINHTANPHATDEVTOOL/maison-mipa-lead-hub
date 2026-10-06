@@ -40,8 +40,12 @@ export async function backupDatabase(targetFilePath?: string): Promise<{ backupF
 
   const client = await pool.connect();
   try {
-    // Consistent snapshot transaction isolation
-    await client.query('BEGIN');
+    // Consistent snapshot transaction isolation (REPEATABLE READ)
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    } catch {
+      await client.query('BEGIN');
+    }
 
     for (const table of tables) {
       try {
@@ -71,9 +75,23 @@ export async function backupDatabase(targetFilePath?: string): Promise<{ backupF
     client.release();
   }
 
+  const rawJson = JSON.stringify(backupData);
+  const crypto = require('crypto');
+  const checksum = crypto.createHash('sha256').update(rawJson).digest('hex');
+
+  const exportPayload = {
+    metadata: {
+      timestamp: new Date().toISOString(),
+      schema_version: 3,
+      checksum,
+      total_records: totalRecords,
+    },
+    tables: backupData,
+  };
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupFile = targetFilePath || path.join(backupDir, `backup_${timestamp}.json`);
-  fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2), 'utf-8');
+  fs.writeFileSync(backupFile, JSON.stringify(exportPayload, null, 2), 'utf-8');
 
   console.log('\n========================================================');
   console.log(`  SAO LƯU THÀNH CÔNG!`);

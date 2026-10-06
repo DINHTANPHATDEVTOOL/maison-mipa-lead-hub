@@ -68,6 +68,43 @@ export class OutreachRepository {
       // 23505 is PostgreSQL unique_violation code
       if (err.code === '23505' || err.message?.includes('unique_first_touch_outreach')) {
         const existing = await this.getByPostId(data.post_id);
+
+        // State Machine: If previously failed strictly BEFORE submit, allow controlled CAS re-claim
+        if (existing && (existing.status === 'failed_before_submit' || existing.status === 'rejected')) {
+          const reclaimRes = await pool.query(`
+            UPDATE outreach_interactions
+            SET status = $1,
+                operator_name = $2,
+                page_identity = $3,
+                comment_content = $4,
+                template_used_id = $5,
+                error_message = NULL,
+                updated_at = NOW()
+            WHERE post_id = $6 AND status IN ('failed_before_submit', 'rejected')
+            RETURNING *;
+          `, [
+            data.initialStatus || 'sending',
+            data.operator_name || 'System Worker',
+            data.page_identity,
+            data.comment_content,
+            data.template_used_id || null,
+            data.post_id,
+          ]);
+
+          if (reclaimRes.rows.length > 0) {
+            const reclaimed = this.mapRow(reclaimRes.rows[0]);
+            await this.recordAttempt({
+              post_id: data.post_id,
+              page_name: data.page_identity,
+              template_id: data.template_used_id,
+              comment_content: data.comment_content,
+              status: data.initialStatus || 'sending',
+              attempted_by: data.operator_name || 'System Worker',
+            });
+            return { success: true, interaction: reclaimed };
+          }
+        }
+
         return { success: false, interaction: existing };
       }
       throw err;
