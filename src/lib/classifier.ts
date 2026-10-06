@@ -1,7 +1,21 @@
 import { LeadClassification, PostIntent, ServiceItem, OutreachTemplate } from '@/types';
 
 // ==============================================================================
-// KEYWORD DICTIONARIES WITH CONTEXT SENSITIVITY
+// VIETNAMESE ACCENT NORMALIZATION HELPER
+// ==============================================================================
+
+export function removeVietnameseTones(str: string): string {
+  if (!str) return '';
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase();
+}
+
+// ==============================================================================
+// KEYWORD DICTIONARIES WITH CONTEXT SENSITIVITY (ACCENTED & UNACCENTED)
 // ==============================================================================
 
 // Direct studio / photographer ads & provider promotions (NOT customers!)
@@ -12,14 +26,36 @@ const PROVIDER_AD_KEYWORDS = [
   'nhận chụp kỷ yếu', 'nhận chụp áo dài', 'nhận chụp concept', 'nhận chụp nàng thơ',
   'inbox mình báo giá', 'inbox em báo giá', 'inbox để nhận ưu đãi', 'ib để đặt lịch',
   'bảng giá chụp', 'combo chụp trọn gói', 'ưu đãi chụp ảnh', 'nhận làm bộ ảnh',
-  'liên hệ book lịch', 'portfolio:', 'link fb:', 'link page:', 'zalo: 0'
+  'liên hệ book lịch', 'portfolio:', 'link fb:', 'link page:', 'zalo: 0',
+  // Unaccented equivalents
+  'nhan chup', 'nhan book', 'nhan keo', 'nhan job', 'nhan lich',
+  'inbox de dat lich', 'inbox dat lich', 'inbox de book', 'inbox book lich',
+  'ben minh nhan', 'ben em nhan', 'tiem nhan', 'studio nhan',
+  'bang gia chup', 'combo chup', 'uu dai chup', 'nhan lam bo anh', 'lien he book lich'
 ];
 
 // Closed / Fulfilled / Cancelled posts
 const CLOSED_POST_KEYWORDS = [
   'đã tìm được thợ', 'đã tìm được', 'đã book được', 'đã có thợ',
   'không cần nữa', 'đã chốt thợ', 'đã thuê được', 'đã chọn được',
-  'hết nhu cầu', 'xin phép đóng bài', 'đã xong nha', 'đã kiếm được thợ'
+  'hết nhu cầu', 'xin phép đóng bài', 'đã xong nha', 'đã kiếm được thợ',
+  // Unaccented equivalents
+  'da tim duoc tho', 'da tim duoc', 'da book duoc', 'da co tho',
+  'khong can nua', 'da chot tho', 'da thue duoc', 'da chon duoc',
+  'het nhu cau', 'xin phep dong bai', 'da xong nha', 'da kiem duoc tho'
+];
+
+// Explicit negative customer phrases ("NOT looking for service")
+const NEGATIVE_LOOKING_KEYWORDS = [
+  'không tìm thợ', 'không cần thợ', 'chưa cần thợ', 'không thuê thợ',
+  'không muốn chụp', 'không phải tìm thợ', 'không thuê chụp', 'không book thợ',
+  'chỉ hỏi giá máy ảnh không thuê chụp', 'pass lại máy ảnh chứ không tìm thợ',
+  'chỉ hỏi mua lens', 'chỉ mua máy ảnh', 'không có nhu cầu chụp',
+  // Unaccented equivalents
+  'khong tim tho', 'khong can tho', 'chua can tho', 'khong thue tho',
+  'khong muon chup', 'khong phai tim tho', 'khong thue chup', 'khong book tho',
+  'chi hoi gia may anh khong thue chup', 'pass lai may anh chu khong tim tho',
+  'chi hoi mua lens', 'chi mua may anh', 'khong co nhu cau chup'
 ];
 
 // Selling / Pass / Equipment keywords (Requires explicit selling intent)
@@ -27,19 +63,28 @@ const EXPLICIT_SELLING_PHRASES = [
   'bán máy', 'pass máy', 'thanh lý máy', 'bán lens', 'pass lens', 'thanh lý lens',
   'bán ống kính', 'pass ống kính', 'cần bán', 'muốn bán', 'thanh lý body',
   'giá ra đi', 'giá công khai', 'fullbox nguyên seal', 'máy ảnh cũ',
-  'gdtt trực tiếp', 'ship cod', 'tình trạng 99%', 'hết bảo hành', 'inbox lấy giá'
+  'gdtt trực tiếp', 'ship cod', 'tình trạng 99%', 'hết bảo hành', 'inbox lấy giá',
+  'pass body', 'bán body', 'thanh lý phụ kiện', 'pass gimbal', 'bán flash',
+  // Unaccented equivalents
+  'ban may', 'pass may', 'thanh ly may', 'ban lens', 'pass lens', 'thanh ly lens',
+  'ban ong kinh', 'pass ong kinh', 'can ban', 'muon ban', 'thanh ly body',
+  'gia ra di', 'gia cong khai', 'may anh cu', 'gdtt', 'pass body', 'ban body'
 ];
 
 // Spam / Scam / Non-photography
 const SPAM_KEYWORDS = [
   'vay tiền', 'tuyển dụng việc làm', 'cộng tác viên shopee', 'kiếm tiền online',
-  'bán acc', 'tăng like', 'tăng follow', 'chạy quảng cáo fb', 'hoa hồng ngày'
+  'bán acc', 'tăng like', 'tăng follow', 'chạy quảng cáo fb', 'hoa hồng ngày',
+  'vay tien', 'cong tac vien shopee', 'kiem tien online', 'ban acc', 'tang like', 'tang follow'
 ];
 
-// Recruiting models / casting
+// Recruiting models / casting / hiring
 const RECRUITING_KEYWORDS = [
   'tuyển thợ phụ', 'tuyển mẫu', 'tuyển model', 'cần tuyển mẫu', 'tìm mẫu make',
-  'cát xê mẫu', 'cast:', 'tuyển ctv chụp'
+  'cát xê mẫu', 'cast:', 'tuyển ctv chụp', 'tuyển phụ tá', 'cần mẫu ảnh', 'tìm model',
+  // Unaccented equivalents
+  'tuyen tho phu', 'tuyen mau', 'tuyen model', 'can tuyen mau', 'tim mau make',
+  'cat xe mau', 'cast mau', 'tuyen ctv chup', 'tuyen phu ta', 'can mau anh', 'tim model'
 ];
 
 // Genuine customer looking for service
@@ -47,8 +92,18 @@ const CUSTOMER_LOOKING_KEYWORDS = [
   'cần tìm thợ', 'tìm thợ chụp', 'cần chụp', 'muốn chụp', 'kiếm thợ ảnh',
   'tìm studio', 'cần studio', 'tìm photographer', 'ai nhận chụp', 'cần book thợ',
   'muốn làm bộ ảnh', 'cần thợ ngày', 'chụp ngoại cảnh', 'cần thợ có tâm',
-  'tìm bạn chụp', 'muốn book lịch', 'cần người chụp', 'thuê thợ chụp'
+  'tìm bạn chụp', 'muốn book lịch', 'cần người chụp', 'thuê thợ chụp',
+  'tìm người chụp', 'muốn chụp một bộ', 'cần kiếm thợ', 'tìm ekip chụp',
+  // Unaccented equivalents
+  'can tim tho', 'tim tho chup', 'can chup', 'muon chup', 'kiem tho anh',
+  'tim studio', 'can studio', 'tim photographer', 'ai nhan chup', 'can book tho',
+  'muon lam bo anh', 'can tho ngay', 'chup ngoai canh', 'can tho co tam',
+  'tim ban chup', 'muon book lich', 'can nguoi chup', 'thue tho chup',
+  'tim nguoi chup', 'muon chup mot bo', 'can kiem tho', 'tim ekip chup'
 ];
+
+// Allowed template placeholders
+const ALLOWED_PLACEHOLDERS = ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'];
 
 export interface ClassificationResult {
   intent: PostIntent;
@@ -111,6 +166,24 @@ function getNextDayOfWeekInVN(targetDayOfWeek: number, baseDate?: string): strin
 }
 
 /**
+ * Budget extraction helper
+ */
+export function extractBudget(text: string): string | null {
+  if (!text) return null;
+  const budgetRegex = /(?:ngân\s*sách|kinh\s*phí|budget|ngan\s*sach|kinh\s*phi|chi\s*phí|chi\s*phi|tầm\s*giá|tam\s*gia)\s*[:=-]?\s*(?:khoảng|tầm|tầm\s*khoảng|khoang|tam|tam\s*khoang)?\s*([0-9]+(?:\.[0-9]+)?\s*(?:k|tr|triệu|trieu|nghìn|nghin|vnd|đ|d)?[0-9]*(?:\s*-\s*[0-9]+(?:\.[0-9]+)?\s*(?:k|tr|triệu|trieu|nghìn|nghin|vnd|đ|d)?[0-9]*)?|hạt\s*dẻ|hat\s*de|sinh\s*viên|sinh\s*vien|học\s*sinh|hoc\s*sinh)/i;
+  const match = text.match(budgetRegex);
+  if (match) {
+    return match[0].trim();
+  }
+  const colonRegex = /(?:budget|ngân\s*sách|kinh\s*phí|ngan\s*sach|kinh\s*phi)\s*[:=-]\s*([^\n,.]+)/i;
+  const match2 = text.match(colonRegex);
+  if (match2) {
+    return match2[0].trim();
+  }
+  return null;
+}
+
+/**
  * Main Lead Classification Engine
  */
 export function classifyPostContent(
@@ -121,49 +194,53 @@ export function classifyPostContent(
 ): ClassificationResult {
   const sanitizedText = sanitizePostContent(rawContent);
   const lower = sanitizedText.toLowerCase();
+  const unaccented = removeVietnameseTones(lower);
+
+  // Helper matcher: check either accented or unaccented
+  const containsAny = (keywords: string[]) => {
+    return keywords.some(kw => lower.includes(kw) || unaccented.includes(kw));
+  };
 
   // Tier 1: Spam / Scam Detection
-  for (const kw of SPAM_KEYWORDS) {
-    if (lower.includes(kw)) {
-      return {
-        intent: 'spam',
-        service_detected: null,
-        location: null,
-        pax: null,
-        shooting_date_text: null,
-        shooting_date_suggested: null,
-        budget_raw: null,
-        extra_requirements: [],
-        confidence_score: 95,
-        classification_reason: `Phát hiện nội dung quảng cáo spam/lừa đảo: "${kw}"`,
-        suggested_template_id: null,
-      };
-    }
+  if (containsAny(SPAM_KEYWORDS)) {
+    return {
+      intent: 'spam',
+      service_detected: null,
+      location: null,
+      pax: null,
+      shooting_date_text: null,
+      shooting_date_suggested: null,
+      budget_raw: null,
+      extra_requirements: [],
+      confidence_score: 95,
+      classification_reason: 'Phát hiện nội dung quảng cáo spam/lừa đảo/dịch vụ ngoài chụp ảnh.',
+      suggested_template_id: null,
+    };
   }
 
   // Tier 2: Check if post is Closed / Fulfilled
-  for (const kw of CLOSED_POST_KEYWORDS) {
-    if (lower.includes(kw)) {
-      return {
-        intent: 'unclear',
-        service_detected: null,
-        location: null,
-        pax: null,
-        shooting_date_text: null,
-        shooting_date_suggested: null,
-        budget_raw: null,
-        extra_requirements: [],
-        confidence_score: 90,
-        classification_reason: `Bài viết đã tìm được thợ hoặc đóng nhu cầu: "${kw}". Bỏ qua để tránh làm phiền khách.`,
-        suggested_template_id: null,
-      };
-    }
+  if (containsAny(CLOSED_POST_KEYWORDS)) {
+    return {
+      intent: 'unclear',
+      service_detected: null,
+      location: null,
+      pax: null,
+      shooting_date_text: null,
+      shooting_date_suggested: null,
+      budget_raw: null,
+      extra_requirements: [],
+      confidence_score: 90,
+      classification_reason: 'Bài viết đã tìm được thợ hoặc đóng nhu cầu. Bỏ qua để tránh làm phiền khách.',
+      suggested_template_id: null,
+    };
   }
 
-  // Tier 3: Check if post is Studio / Photographer Promotion (Provider Ad)
-  // Example: "Maison Studio nhận chụp áo dài ở quận 1, inbox để đặt lịch"
-  const isProviderAd = PROVIDER_AD_KEYWORDS.some(kw => lower.includes(kw));
-  if (isProviderAd) {
+  // Tier 3: Check Explicit Negative Cases ("NOT looking for service")
+  const hasNegativeLooking = containsAny(NEGATIVE_LOOKING_KEYWORDS);
+
+  // Tier 4: Check if post is Studio / Photographer Promotion (Provider Ad)
+  const isProviderAd = containsAny(PROVIDER_AD_KEYWORDS);
+  if (isProviderAd && !containsAny(CUSTOMER_LOOKING_KEYWORDS)) {
     return {
       intent: 'selling',
       service_detected: null,
@@ -179,12 +256,11 @@ export function classifyPostContent(
     };
   }
 
-  // Tier 4: Explicit Equipment Selling Check (e.g. pass máy, bán lens)
-  // Ensure "cần tìm thợ ... dùng lens 85mm" is NOT misclassified as selling!
-  const hasExplicitSellingPhrase = EXPLICIT_SELLING_PHRASES.some(phrase => lower.includes(phrase));
-  const hasCustomerLookingPhrase = CUSTOMER_LOOKING_KEYWORDS.some(kw => lower.includes(kw));
+  // Tier 5: Explicit Equipment Selling Check (e.g. pass máy, bán lens)
+  const hasExplicitSellingPhrase = containsAny(EXPLICIT_SELLING_PHRASES);
+  const hasCustomerLookingPhrase = containsAny(CUSTOMER_LOOKING_KEYWORDS);
 
-  if (hasExplicitSellingPhrase && !hasCustomerLookingPhrase) {
+  if ((hasExplicitSellingPhrase || hasNegativeLooking) && (!hasCustomerLookingPhrase || hasNegativeLooking)) {
     return {
       intent: 'selling',
       service_detected: null,
@@ -195,13 +271,17 @@ export function classifyPostContent(
       budget_raw: null,
       extra_requirements: [],
       confidence_score: 92,
-      classification_reason: 'Bài rao bán / sang nhượng thiết bị, máy ảnh hoặc phụ kiện.',
+      classification_reason: hasNegativeLooking 
+        ? 'Bài viết nêu rõ phủ định nhu cầu tìm thợ chụp hoặc chỉ hỏi thiết bị/mua bán.'
+        : 'Bài rao bán / sang nhượng thiết bị, máy ảnh hoặc phụ kiện.',
       suggested_template_id: null,
     };
   }
 
-  // Tier 5: Recruiting models / casting
-  if (RECRUITING_KEYWORDS.some(kw => lower.includes(kw)) && !hasCustomerLookingPhrase) {
+  // Tier 6: Recruiting models / casting / staff hiring
+  const isRecruitingRegex = /(?:tuyển|tuyen|cần\s*tuyển|can\s*tuyen|tìm|tim)\s*(?:[0-9]+\s*)?(?:mẫu|model|thợ\s*phụ|tho\s*phu|ctv|phụ\s*tá|phu\s*ta|diễn\s*viên|dien\s*vien)/i;
+  const isRecruiting = containsAny(RECRUITING_KEYWORDS) || isRecruitingRegex.test(lower) || isRecruitingRegex.test(unaccented);
+  if (isRecruiting && !hasCustomerLookingPhrase) {
     return {
       intent: 'recruiting',
       service_detected: null,
@@ -217,103 +297,169 @@ export function classifyPostContent(
     };
   }
 
-  // Tier 6: Extract Service (ONLY FROM ACTIVE SERVICES)
+  // Tier 7: Extract Service (ONLY FROM ACTIVE SERVICES)
   const activeServices = services.filter(s => s.is_active);
   let detectedService: ServiceItem | null = null;
 
-  if (lower.includes('áo dài') || lower.includes('ao dai') || lower.includes('cổ phục')) {
+  if (
+    lower.includes('áo dài') || unaccented.includes('ao dai') || 
+    lower.includes('cổ phục') || unaccented.includes('co phuc')
+  ) {
     detectedService = activeServices.find(s => s.code === 'AO_DAI') || null;
-  } else if (lower.includes('nàng thơ') || lower.includes('vintage') || lower.includes('concept') || lower.includes('indoor') || lower.includes('sinh nhật')) {
+  } else if (
+    lower.includes('nàng thơ') || unaccented.includes('nang tho') || 
+    lower.includes('vintage') || lower.includes('concept') || 
+    lower.includes('indoor') || lower.includes('sinh nhật') || unaccented.includes('sinh nhat')
+  ) {
     detectedService = activeServices.find(s => s.code === 'NANG_THO') || null;
-  } else if (lower.includes('đôi') || lower.includes('couple') || lower.includes('cưới') || lower.includes('pre-wedding') || lower.includes('bạn gái') || lower.includes('người yêu')) {
+  } else if (
+    lower.includes('đôi') || unaccented.includes('doi') ||
+    lower.includes('couple') || lower.includes('cưới') || unaccented.includes('cuoi') ||
+    lower.includes('pre-wedding') || lower.includes('bạn gái') || unaccented.includes('ban gai') ||
+    lower.includes('người yêu') || unaccented.includes('nguoi yeu')
+  ) {
     detectedService = activeServices.find(s => s.code === 'PRE_WEDDING') || null;
-  } else if (lower.includes('kỷ yếu') || lower.includes('nhóm bạn') || lower.includes('tốt nghiệp') || lower.includes('lớp')) {
+  } else if (
+    lower.includes('kỷ yếu') || unaccented.includes('ky yeu') ||
+    lower.includes('nhóm bạn') || unaccented.includes('nhom ban') ||
+    lower.includes('tốt nghiệp') || unaccented.includes('tot nghiep') ||
+    lower.includes('lớp') || unaccented.includes('lop')
+  ) {
     detectedService = activeServices.find(s => s.code === 'KY_YEU') || null;
   }
 
-  // Tier 7: Extract Location (HCM Districts)
+  // Tier 8: Extract Location (HCM Districts)
   let location: string | null = null;
-  const districtMatch = lower.match(/(quận\s*[0-9]+|q\s*[0-9]+|bình thạnh|thủ đức|gò vấp|phú nhuận|tân bình|quận 1|quận 3|quận 7)/i);
+  const districtMatch = lower.match(/(quận\s*[0-9]+|q\s*[0-9]+|bình thạnh|thủ đức|gò vấp|phú nhuận|tân bình|quận 1|quận 3|quận 7)/i) ||
+                        unaccented.match(/(quan\s*[0-9]+|q\s*[0-9]+|binh thanh|thu duc|go vap|phu nhuan|tan binh|quan 1|quan 3|quan 7)/i);
   if (districtMatch) {
     location = districtMatch[0].toUpperCase() + ', TP. Hồ Chí Minh';
-  } else if (lower.includes('sài gòn') || lower.includes('hcm') || lower.includes('tphcm')) {
+  } else if (
+    lower.includes('sài gòn') || unaccented.includes('sai gon') ||
+    lower.includes('hcm') || lower.includes('tphcm')
+  ) {
     location = 'TP. Hồ Chí Minh';
   }
 
-  // Tier 8: Extract Pax (Number of people)
+  // Tier 9: Extract Pax (Number of people)
   let pax: number | null = null;
-  if (lower.includes('hai người') || lower.includes('2 người') || lower.includes('2 bạn') || lower.includes('hai bạn') || lower.includes('couple')) {
+  if (
+    lower.includes('hai người') || unaccented.includes('hai nguoi') ||
+    lower.includes('2 người') || unaccented.includes('2 nguoi') ||
+    lower.includes('2 bạn') || unaccented.includes('2 ban') ||
+    lower.includes('hai bạn') || unaccented.includes('hai ban') ||
+    lower.includes('couple')
+  ) {
     pax = 2;
-  } else if (lower.includes('một mình') || lower.includes('1 mình') || lower.includes('1 người') || lower.includes('cho em') || lower.includes('cá nhân')) {
+  } else if (
+    lower.includes('một mình') || unaccented.includes('mot minh') ||
+    lower.includes('1 mình') || unaccented.includes('1 minh') ||
+    lower.includes('1 người') || unaccented.includes('1 nguoi') ||
+    lower.includes('cho em') || unaccented.includes('cho em') ||
+    lower.includes('cá nhân') || unaccented.includes('ca nhan')
+  ) {
     pax = 1;
   } else {
-    const numMatch = lower.match(/([0-9]+)\s*(người|bạn|thành viên)/);
+    const numMatch = lower.match(/([0-9]+)\s*(người|bạn|thành viên)/) ||
+                     unaccented.match(/([0-9]+)\s*(nguoi|ban|thanh vien)/);
     if (numMatch) {
       pax = parseInt(numMatch[1], 10);
     }
   }
 
-  // Tier 9: Extract Date with Vietnam Timezone Accuracy
+  // Tier 10: Extract Date with Vietnam Timezone Accuracy
   let dateText: string | null = null;
   let dateSuggested: string | null = null;
 
-  if (lower.includes('chủ nhật này') || lower.includes('cn này')) {
+  if (
+    lower.includes('chủ nhật này') || unaccented.includes('chu nhat nay') ||
+    lower.includes('cn này') || unaccented.includes('cn nay')
+  ) {
     dateText = 'Chủ nhật tuần này';
     dateSuggested = getNextDayOfWeekInVN(0, postedAt);
-  } else if (lower.includes('thứ 7 này') || lower.includes('t7 này')) {
+  } else if (
+    lower.includes('thứ 7 này') || unaccented.includes('thu 7 nay') ||
+    lower.includes('t7 này') || unaccented.includes('t7 nay')
+  ) {
     dateText = 'Thứ bảy tuần này';
     dateSuggested = getNextDayOfWeekInVN(6, postedAt);
-  } else if (lower.includes('cuối tuần này')) {
+  } else if (
+    lower.includes('cuối tuần này') || unaccented.includes('cuoi tuan nay') ||
+    lower.includes('cuối tuần') || unaccented.includes('cuoi tuan')
+  ) {
     dateText = 'Cuối tuần này';
     dateSuggested = getNextDayOfWeekInVN(6, postedAt);
-  } else if (lower.includes('hôm nay') || lower.includes('tối nay')) {
+  } else if (
+    lower.includes('hôm nay') || unaccented.includes('hom nay') ||
+    lower.includes('tối nay') || unaccented.includes('toi nay')
+  ) {
     dateText = 'Hôm nay';
     dateSuggested = getVietnamDate(postedAt).dateString;
-  } else if (lower.includes('ngày mai') || lower.includes('mai')) {
+  } else if (
+    lower.includes('ngày mai') || unaccented.includes('ngay mai') ||
+    lower.includes('mai')
+  ) {
     dateText = 'Ngày mai';
     dateSuggested = calculateSuggestedDateInVN(1, postedAt);
   }
 
-  // Tier 10: Extract Extra Requirements
+  // Tier 11: Extract Budget
+  const budgetRaw = extractBudget(sanitizedText);
+
+  // Tier 12: Extract Extra Requirements
   const extraRequirements: string[] = [];
-  if (lower.includes('tạo dáng') || lower.includes('hướng dẫn dáng') || lower.includes('hỗ trợ tạo dáng') || lower.includes('ngại ống kính') || lower.includes('chỉ dáng') || lower.includes('bị đơ')) {
+  if (
+    lower.includes('tạo dáng') || unaccented.includes('tao dang') ||
+    lower.includes('hướng dẫn dáng') || unaccented.includes('huong dan dang') ||
+    lower.includes('hỗ trợ tạo dáng') || unaccented.includes('ho tro tao dang') ||
+    lower.includes('ngại ống kính') || unaccented.includes('ngai ong kinh') ||
+    lower.includes('chỉ dáng') || unaccented.includes('chi dang') ||
+    lower.includes('bị đơ') || unaccented.includes('bi do')
+  ) {
     extraRequirements.push('Hỗ trợ hướng dẫn tạo dáng tận tình cho khách ít chụp');
   }
-  if (lower.includes('makeup') || lower.includes('trang điểm')) {
+  if (
+    lower.includes('makeup') || lower.includes('trang điểm') || unaccented.includes('trang diem')
+  ) {
     extraRequirements.push('Yêu cầu kèm gói makeup/làm tóc');
   }
-  if (lower.includes('trang phục') || lower.includes('thuê đồ') || lower.includes('áo dài')) {
+  if (
+    lower.includes('trang phục') || unaccented.includes('trang phuc') ||
+    lower.includes('thuê đồ') || unaccented.includes('thue do') ||
+    lower.includes('áo dài') || unaccented.includes('ao dai')
+  ) {
     extraRequirements.push('Có chuẩn bị hoặc tư vấn trang phục');
   }
-  if (lower.includes('lens') || lower.includes('ống kính') || lower.includes('máy')) {
+  if (lower.includes('lens') || lower.includes('ống kính') || unaccented.includes('ong kinh')) {
     const lensMatch = lower.match(/(lens\s*[0-9]+(?:mm)?|85mm|50mm|35mm)/i);
     if (lensMatch) {
       extraRequirements.push(`Yêu cầu thiết bị thợ ảnh: ${lensMatch[0]}`);
     }
   }
 
-  // Tier 11: Match ONLY Approved Templates of the Detected Service!
-  // CRITICAL FIX: Do NOT fallback to an unrelated service template (e.g. Áo Dài for Kỷ Yếu)!
+  // Tier 13: Match ONLY Approved Templates of the Active Detected Service!
   let suggestedTemplate: OutreachTemplate | null = null;
-  if (detectedService) {
+  if (detectedService && detectedService.is_active) {
     const matchingTemplates = templates.filter(t => t.is_approved && t.service_id === detectedService?.id);
     if (matchingTemplates.length > 0) {
       suggestedTemplate = matchingTemplates[0];
     }
   }
 
-  // Compose suggested comment only if service & matching approved template exist
+  // Compose suggested comment ONLY if service is active & matching approved template exists
   let suggestedCommentText: string | undefined = undefined;
-  if (suggestedTemplate && detectedService) {
+  if (suggestedTemplate && detectedService && detectedService.is_active) {
     const formattedPrice = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(detectedService.base_price);
     suggestedCommentText = suggestedTemplate.template_content
       .replace('{gia}', formattedPrice)
       .replace('{khu_vuc}', location || 'TP. Hồ Chí Minh')
-      .replace('{ho_tro_tao_dang}', detectedService.includes_posing_support ? 'có stylist hướng dẫn tạo dáng chi tiết' : '');
+      .replace('{ho_tro_tao_dang}', detectedService.includes_posing_support ? 'có stylist hướng dẫn tạo dáng chi tiết' : '')
+      .replace('{ten_dich_vu}', detectedService.name)
+      .replace('{ten_khach}', 'bạn');
   }
 
-  // Tier 12: Intent & Realistic Confidence Score Computation
-  const isLooking = hasCustomerLookingPhrase || (detectedService !== null && (location !== null || dateText !== null));
+  // Tier 14: Intent & Realistic Confidence Score
+  const isLooking = !hasNegativeLooking && (hasCustomerLookingPhrase || (detectedService !== null && (location !== null || dateText !== null)));
   const intent: PostIntent = isLooking ? 'looking_for_service' : 'unclear';
 
   let confidence = 50;
@@ -341,7 +487,7 @@ export function classifyPostContent(
     pax,
     shooting_date_text: dateText,
     shooting_date_suggested: dateSuggested,
-    budget_raw: null,
+    budget_raw: budgetRaw,
     extra_requirements: extraRequirements,
     confidence_score: confidence,
     classification_reason: reason,
@@ -353,6 +499,6 @@ export function classifyPostContent(
 export function sanitizePostContent(text: string): string {
   if (!text) return '';
   return text
-    .replace(/(system prompt|ignore previous instructions|bỏ qua hướng dẫn|hãy viết rằng|đăng nội dung này)/gi, '[REDACTED_INPUT]')
+    .replace(/(system\s*prompt|ignore\s*previous\s*instructions|ignore\s*all\s*instructions|bỏ\s*qua\s*hướng\s*dẫn|bo\s*qua\s*huong\s*dan|hãy\s*viết\s*rằng|hay\s*viet\s*rang|đăng\s*nội\s*dung\s*này|dang\s*noi\s*dung\s*nay|set\s*price\s*to|admin:\s*dispatch)/gi, '[REDACTED_INPUT]')
     .trim();
 }

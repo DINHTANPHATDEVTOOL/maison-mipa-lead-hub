@@ -10,6 +10,7 @@ export default function ServicesTemplatesPage() {
   const [templates, setTemplates] = useState<OutreachTemplate[]>([]);
   const [activeTab, setActiveTab] = useState<'services' | 'templates'>('services');
   const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<OutreachTemplate | null>(null);
   const [editingService, setEditingService] = useState<ServiceItem | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -52,8 +53,9 @@ export default function ServicesTemplatesPage() {
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingTemplate) return;
+    if (!editingTemplate || isSaving) return;
 
+    setIsSaving(true);
     try {
       const res = await apiFetch('/api/templates', {
         method: 'PUT',
@@ -62,10 +64,18 @@ export default function ServicesTemplatesPage() {
           id: editingTemplate.id,
           title: templateTitle,
           template_content: templateContent,
+          version: editingTemplate.version,
         }),
       });
 
       const data = await res.json();
+      if (res.status === 409 || data.conflict) {
+        alert('Xung đột phiên bản (OCC Conflict): Mẫu bình luận này vừa được chỉnh sửa bởi một nhân viên khác. Hệ thống sẽ tải lại dữ liệu mới nhất.');
+        setEditingTemplate(null);
+        fetchData();
+        return;
+      }
+
       if (data.success) {
         setEditingTemplate(null);
         setNotice('Đã cập nhật mẫu bình luận và tăng phiên bản.');
@@ -75,6 +85,8 @@ export default function ServicesTemplatesPage() {
       }
     } catch (e: any) {
       alert('Lỗi: ' + e.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -88,8 +100,9 @@ export default function ServicesTemplatesPage() {
 
   const handleSaveService = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingService) return;
+    if (!editingService || isSaving) return;
 
+    setIsSaving(true);
     try {
       const res = await apiFetch('/api/services', {
         method: 'PUT',
@@ -113,6 +126,8 @@ export default function ServicesTemplatesPage() {
       }
     } catch (e: any) {
       alert('Lỗi: ' + e.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -323,9 +338,10 @@ export default function ServicesTemplatesPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-sm transition-colors"
+                  disabled={isSaving}
+                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
                 >
-                  Lưu & Tăng Phiên Bản
+                  {isSaving ? 'Đang lưu...' : 'Lưu & Tăng Phiên Bản'}
                 </button>
               </div>
             </form>
@@ -402,9 +418,10 @@ export default function ServicesTemplatesPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-sm transition-colors"
+                  disabled={isSaving}
+                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
                 >
-                  Lưu Gói Dịch Vụ
+                  {isSaving ? 'Đang lưu...' : 'Lưu Gói Dịch Vụ'}
                 </button>
               </div>
             </form>

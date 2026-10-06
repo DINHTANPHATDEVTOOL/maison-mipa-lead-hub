@@ -15,7 +15,8 @@ import {
   ChevronRight,
   UserCheck,
   List,
-  Kanban
+  Kanban,
+  Download
 } from 'lucide-react';
 import { CRMLead, CRMStage } from '@/types';
 import { apiFetch } from '@/lib/api-client';
@@ -32,6 +33,8 @@ const STAGES: { key: CRMStage; label: string; color: string; bg: string; desc: s
 export default function CRMPage() {
   const [leads, setLeads] = useState<CRMLead[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [selectedLead, setSelectedLead] = useState<CRMLead | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -63,6 +66,31 @@ export default function CRMPage() {
     }
   };
 
+  const handleExportCsv = async () => {
+    setIsExporting(true);
+    try {
+      const res = await apiFetch('/api/leads/export');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Xuất CSV thất bại');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `maison_mipa_leads_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setNotice('Đã xuất danh sách khách hàng CRM thành công dưới định dạng CSV.');
+    } catch (err: any) {
+      alert('Lỗi xuất CSV: ' + err.message);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const openEditModal = (lead: CRMLead) => {
     setSelectedLead(lead);
     setStage(lead.stage);
@@ -75,8 +103,9 @@ export default function CRMPage() {
 
   const handleSaveLead = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedLead) return;
+    if (!selectedLead || isSaving) return;
 
+    setIsSaving(true);
     try {
       const res = await apiFetch('/api/leads', {
         method: 'PATCH',
@@ -88,10 +117,18 @@ export default function CRMPage() {
           quoted_amount: quotedAmount ? parseFloat(quotedAmount) : null,
           booking_date: bookingDate ? new Date(bookingDate).toISOString() : null,
           assigned_cskh_name: assignedStaff,
+          version: (selectedLead as any).version,
         }),
       });
 
       const data = await res.json();
+      if (res.status === 409 || data.conflict) {
+        alert('Xung đột phiên bản (OCC Conflict): Hồ sơ khách hàng này vừa được cập nhật bởi một nhân viên khác. Hệ thống sẽ tải lại dữ liệu mới nhất.');
+        setIsEditing(false);
+        fetchLeads();
+        return;
+      }
+
       if (data.success) {
         setIsEditing(false);
         setNotice(`Đã cập nhật hồ sơ khách hàng "${selectedLead.customer_name}".`);
@@ -101,6 +138,8 @@ export default function CRMPage() {
       }
     } catch (err: any) {
       alert('Lỗi: ' + err.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -119,30 +158,41 @@ export default function CRMPage() {
           </p>
         </div>
 
-        {/* View mode toggle */}
-        <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-1 text-xs self-start sm:self-auto">
+        {/* View mode toggle & Export button */}
+        <div className="flex items-center space-x-2 self-start sm:self-auto">
           <button
-            onClick={() => setViewMode('kanban')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md font-medium transition-colors ${
-              viewMode === 'kanban'
-                ? 'bg-amber-600 text-white font-semibold'
-                : 'text-zinc-400 hover:text-white'
-            }`}
+            onClick={handleExportCsv}
+            disabled={isExporting}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 text-xs font-medium transition-colors disabled:opacity-50"
           >
-            <Kanban className="w-3.5 h-3.5" />
-            <span>Dạng Bảng Cột</span>
+            <Download className={`w-3.5 h-3.5 ${isExporting ? 'animate-spin' : ''}`} />
+            <span>{isExporting ? 'Đang xuất...' : 'Xuất CSV'}</span>
           </button>
-          <button
-            onClick={() => setViewMode('table')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md font-medium transition-colors ${
-              viewMode === 'table'
-                ? 'bg-amber-600 text-white font-semibold'
-                : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <List className="w-3.5 h-3.5" />
-            <span>Dạng Danh Sách</span>
-          </button>
+
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-1 text-xs">
+            <button
+              onClick={() => setViewMode('kanban')}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md font-medium transition-colors ${
+                viewMode === 'kanban'
+                  ? 'bg-amber-600 text-white font-semibold'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Kanban className="w-3.5 h-3.5" />
+              <span>Dạng Bảng Cột</span>
+            </button>
+            <button
+              onClick={() => setViewMode('table')}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md font-medium transition-colors ${
+                viewMode === 'table'
+                  ? 'bg-amber-600 text-white font-semibold'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+              <span>Dạng Danh Sách</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -398,9 +448,10 @@ export default function CRMPage() {
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                disabled={isSaving}
+                className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold disabled:opacity-50 flex items-center space-x-1.5"
               >
-                Lưu Thay Đổi
+                <span>{isSaving ? 'Đang lưu...' : 'Lưu Thay Đổi'}</span>
               </button>
             </div>
           </form>

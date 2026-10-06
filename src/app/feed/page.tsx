@@ -33,6 +33,7 @@ export default function FeedQueuePage() {
   const [customComment, setCustomComment] = useState('');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [dispatchingId, setDispatchingId] = useState<string | null>(null);
+  const [isSubmittingManual, setIsSubmittingManual] = useState(false);
   const [authErrorModal, setAuthErrorModal] = useState<{ open: boolean; message: string; post?: FacebookPost } | null>(null);
 
   useEffect(() => {
@@ -55,6 +56,7 @@ export default function FeedQueuePage() {
   };
 
   const handleApproveAndComment = async (post: FacebookPost, commentText?: string) => {
+    if (dispatchingId) return;
     const textToSend = commentText || post.classification?.suggested_comment_text;
     if (!textToSend) {
       alert('Vui lòng nhập nội dung bình luận!');
@@ -102,8 +104,9 @@ export default function FeedQueuePage() {
 
   const handleManualAssistedSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!manualPost) return;
+    if (!manualPost || isSubmittingManual) return;
 
+    setIsSubmittingManual(true);
     try {
       const text = manualPost.classification?.suggested_comment_text || 'Đã tiếp cận thủ công';
       const res = await apiFetch(`/api/posts/${manualPost.id}/comment`, {
@@ -131,6 +134,8 @@ export default function FeedQueuePage() {
       }
     } catch (err: any) {
       alert('Lỗi: ' + err.message);
+    } finally {
+      setIsSubmittingManual(false);
     }
   };
 
@@ -434,9 +439,10 @@ export default function FeedQueuePage() {
               </button>
               <button
                 onClick={() => handleApproveAndComment(editingPost, customComment)}
-                className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                disabled={Boolean(dispatchingId)}
+                className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold disabled:opacity-50"
               >
-                Duyệt & Đăng
+                {dispatchingId === editingPost.id ? 'Đang gửi...' : 'Duyệt & Đăng'}
               </button>
             </div>
           </div>
@@ -489,9 +495,10 @@ export default function FeedQueuePage() {
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                disabled={isSubmittingManual}
+                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold disabled:opacity-50"
               >
-                Xác Nhận & Chuyển CSKH
+                {isSubmittingManual ? 'Đang xác nhận...' : 'Xác Nhận & Chuyển CSKH'}
               </button>
             </div>
           </form>
