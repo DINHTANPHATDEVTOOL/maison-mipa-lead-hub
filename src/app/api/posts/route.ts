@@ -9,7 +9,7 @@ export const revalidate = 0;
 
 export async function GET(req: Request) {
   // Authentication check: Staff only (admin, marketing, cskh)
-  const auth = verifyAuth(req, ['admin', 'marketing', 'cskh']);
+  const auth = await verifyAuth(req, ['admin', 'marketing', 'cskh']);
   if (!auth.success) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
@@ -37,7 +37,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     // Authentication check: Admin and Marketing only
-    const auth = verifyAuth(req, ['admin', 'marketing']);
+    const auth = await verifyAuth(req, ['admin', 'marketing']);
     if (!auth.success) {
       return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
     }

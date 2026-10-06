@@ -21,10 +21,21 @@ echo "========================================================"
 echo "  KHỞI ĐỘNG MAISON MIPA LEAD HUB (NATIVE NODE.JS)"
 echo "========================================================"
 
-# Kiểm tra .env
-if [ ! -f .env ]; then
-  echo "[-] Lỗi: Thiếu tệp .env. Vui lòng chạy './setup.sh' trước."
+# Kiểm tra và nạp biến môi trường
+if [ ! -f .env ] && [ ! -f .env.local ]; then
+  echo "[-] Lỗi: Thiếu tệp .env hoặc .env.local. Vui lòng chạy './setup.sh' trước."
   exit 1
+fi
+
+if [ -f .env ]; then
+  set -a
+  source .env 2>/dev/null || true
+  set +a
+fi
+if [ -f .env.local ]; then
+  set -a
+  source .env.local 2>/dev/null || true
+  set +a
 fi
 
 # Dừng tiến trình cũ nếu còn chạy

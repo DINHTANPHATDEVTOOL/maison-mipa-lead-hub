@@ -11,13 +11,16 @@ export class FacebookAuthManager {
 
   constructor(encryptionKey?: string) {
     const envKey = process.env.FACEBOOK_SESSION_ENCRYPTION_KEY?.trim();
-    if (process.env.NODE_ENV === 'production' && !envKey && !encryptionKey) {
+    const isBuildPhase = process.env.NEXT_PHASE === 'phase-production-build' || process.env.npm_lifecycle_event === 'build';
+    if (process.env.NODE_ENV === 'production' && !isBuildPhase && !envKey && !encryptionKey) {
       throw new Error(
         '[AuthManager Error] Biến môi trường FACEBOOK_SESSION_ENCRYPTION_KEY là bắt buộc trong môi trường Production. Không được sử dụng khóa phái sinh công khai.'
       );
     }
     if (!envKey && !encryptionKey) {
-      console.warn('[AuthManager WARNING] Chưa cấu hình FACEBOOK_SESSION_ENCRYPTION_KEY trong .env. Sử dụng khóa phái sinh từ môi trường máy.');
+      if (!isBuildPhase) {
+        console.warn('[AuthManager WARNING] Chưa cấu hình FACEBOOK_SESSION_ENCRYPTION_KEY trong .env. Sử dụng khóa phái sinh từ môi trường máy.');
+      }
     }
     this.encryptionKey = encryptionKey || envKey || this.deriveMachineKey();
     if (!fs.existsSync(SESSION_DIR)) {

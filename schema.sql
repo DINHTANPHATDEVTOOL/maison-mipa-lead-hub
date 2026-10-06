@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS lead_classifications (
     shooting_date_suggested DATE,
     budget_raw TEXT,
     extra_requirements TEXT,
-    confidence_score NUMERIC(5, 4) NOT NULL DEFAULT 1.0,
+    confidence_score NUMERIC(5, 2) NOT NULL DEFAULT 100.0 CHECK (confidence_score >= 0 AND confidence_score <= 100),
     classification_reason TEXT,
     suggested_template_id VARCHAR(64) REFERENCES outreach_templates(id) ON DELETE SET NULL,
     suggested_comment_text TEXT,

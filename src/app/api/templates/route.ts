@@ -8,7 +8,7 @@ export const revalidate = 0;
 
 export async function GET(req: Request) {
   // Allow authenticated staff to read templates
-  const auth = verifyAuth(req);
+  const auth = await verifyAuth(req);
   if (!auth.success) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
@@ -27,7 +27,7 @@ export async function GET(req: Request) {
 export async function PUT(req: Request) {
   try {
     // RBAC: Admin and Marketing can update outreach templates
-    const auth = verifyAuth(req, ['admin', 'marketing']);
+    const auth = await verifyAuth(req, ['admin', 'marketing']);
     if (!auth.success) {
       return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
     }

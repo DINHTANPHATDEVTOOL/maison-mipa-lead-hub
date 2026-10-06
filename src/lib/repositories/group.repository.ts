@@ -61,9 +61,10 @@ export class GroupRepository {
     can_page_comment?: boolean;
   }): Promise<FacebookGroup> {
     const pool = getDbPool();
+    const id = data.id || ('grp_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9));
     const res = await pool.query(`
       INSERT INTO facebook_groups (
-        ${data.id ? 'id,' : ''}
+        id,
         name,
         url,
         check_interval_seconds,
@@ -74,18 +75,11 @@ export class GroupRepository {
         created_at,
         updated_at
       ) VALUES (
-        ${data.id ? '$1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW()' : '$1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW()'}
+        $1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW()
       )
       RETURNING *
-    `, data.id ? [
-      data.id,
-      data.name.trim(),
-      data.url.trim(),
-      data.check_interval_seconds ?? 150,
-      data.lookback_hours ?? 24,
-      data.status ?? 'active',
-      data.can_page_comment ?? true,
-    ] : [
+    `, [
+      id,
       data.name.trim(),
       data.url.trim(),
       data.check_interval_seconds ?? 150,
@@ -162,8 +156,20 @@ export class GroupRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public async updateCheckTimestamps(id: string, lastCheckedAt: string, nextCheckAt: string): Promise<FacebookGroup | null> {
-    return this.update(id, { last_checked_at: lastCheckedAt, next_check_at: nextCheckAt });
+  public async updateCheckTimestamps(
+    id: string,
+    lastCheckedAt: string | Date,
+    nextCheckAt: string | Date,
+    totalPostsFound?: number
+  ): Promise<FacebookGroup | null> {
+    const updates: Partial<FacebookGroup> = {
+      last_checked_at: typeof lastCheckedAt === 'string' ? lastCheckedAt : lastCheckedAt.toISOString(),
+      next_check_at: typeof nextCheckAt === 'string' ? nextCheckAt : nextCheckAt.toISOString(),
+    };
+    if (typeof totalPostsFound === 'number') {
+      updates.total_posts_found = totalPostsFound;
+    }
+    return this.update(id, updates);
   }
 
   public async updateStatus(id: string, status: import('@/types').GroupCheckStatus, lastErrorMessage?: string | null): Promise<FacebookGroup | null> {

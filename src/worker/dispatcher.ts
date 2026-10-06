@@ -7,14 +7,20 @@ export interface DispatchCommentParams {
   commentContent: string;
   pageIdentity?: string; // Default: 'Maison MIPA'
   pageId?: string; // Facebook Page ID (e.g. '100083281234567')
+  targetPageId?: string;
   lookbackTimeoutMs?: number;
 }
 
 export interface DispatchCommentResult {
+  success?: boolean;
   status: 'sent_confirmed' | 'uncertain_failed' | 'rejected';
   commentFacebookId?: string;
+  commentId?: string;
   permalink?: string;
+  commentPermalink?: string;
   errorMessage?: string;
+  error?: string;
+  needsAuth?: boolean;
 }
 
 export interface ActiveIdentityResult {
@@ -65,12 +71,11 @@ export function parseStructuredIdentity(
   }
 
   let activePageId: string | null = null;
-  if (targetPageId && idsArray.includes(targetPageId)) {
-    activePageId = targetPageId;
-  } else if (idsArray.length === 1) {
+  if (idsArray.length === 1) {
     activePageId = idsArray[0];
   } else if (idsArray.length > 1) {
-    activePageId = idsArray[0]; // first observed
+    // When conflicting IDs exist, record primary observed and ensure conflicts array is set
+    activePageId = idsArray[0];
   }
 
   // Extract name: text before [ or (
@@ -88,10 +93,11 @@ export function parseStructuredIdentity(
   }
 
   let identityType: ActiveIdentityResult['identityType'] = 'unknown';
-  if (activePageId || rawEvidence.toLowerCase().includes('page') || rawEvidence.toLowerCase().includes('maison')) {
-    identityType = 'page';
-  } else if (rawEvidence.toLowerCase().includes('cá nhân') || rawEvidence.toLowerCase().includes('personal')) {
+  const lowerEv = rawEvidence.toLowerCase();
+  if (lowerEv.includes('cá nhân') || lowerEv.includes('personal') || lowerEv.includes('profile.php')) {
     identityType = 'personal';
+  } else if (activePageId || lowerEv.includes('page') || lowerEv.includes('maison')) {
+    identityType = 'page';
   }
 
   return {
@@ -112,8 +118,11 @@ export class FacebookCommentDispatcher {
     const sessionSummary = authManager.getSessionSummary();
     if (!sessionSummary.exists || !sessionSummary.valid) {
       return {
+        success: false,
         status: 'rejected',
         errorMessage: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState). Hệ thống từ chối báo thành công giả khi chưa có quyền truy cập thực tế.',
+        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState).',
+        needsAuth: true,
       };
     }
 
@@ -161,8 +170,11 @@ export class FacebookCommentDispatcher {
 
       if (isLoggedOut) {
         return {
+          success: false,
           status: 'rejected',
           errorMessage: 'Mất phiên đăng nhập Facebook hoặc bị Meta yêu cầu checkpoint xác minh danh tính.',
+          error: 'Mất phiên đăng nhập Facebook hoặc bị Meta yêu cầu checkpoint xác minh danh tính.',
+          needsAuth: true,
         };
       }
 
@@ -170,12 +182,16 @@ export class FacebookCommentDispatcher {
 
       // STEP 1: Verify & Switch Identity to Page (Maison MIPA)
       const targetPageName = params.pageIdentity || 'Maison MIPA';
-      console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${targetPageName}"`);
-      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName, params.pageId);
+      const effectivePageId = params.targetPageId || params.pageId;
+      console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${targetPageName}" (Page ID: ${effectivePageId || 'bất kỳ'})`);
+      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
       if (!identityResult.matched) {
+        const err = identityResult.error || `Từ chối gửi bình luận: Chưa xác thực được danh tính Page "${targetPageName}". Không được phép gửi bằng tài khoản cá nhân.`;
         return {
+          success: false,
           status: 'rejected',
-          errorMessage: identityResult.error || `Từ chối gửi bình luận: Chưa xác thực được danh tính Page "${targetPageName}". Không được phép gửi bằng tài khoản cá nhân.`,
+          errorMessage: err,
+          error: err,
         };
       }
 
@@ -185,9 +201,12 @@ export class FacebookCommentDispatcher {
       );
 
       if (!commentInput) {
+        const err = 'Không tìm thấy khung nhập bình luận hoặc tài khoản/Page không có quyền bình luận trong bài này.';
         return {
+          success: false,
           status: 'rejected',
-          errorMessage: 'Không tìm thấy khung nhập bình luận hoặc tài khoản/Page không có quyền bình luận trong bài này.',
+          errorMessage: err,
+          error: err,
         };
       }
 
@@ -222,14 +241,17 @@ export class FacebookCommentDispatcher {
 
       // STEP 3.5: PRE-SUBMIT RE-VERIFICATION of composer identity
       // Immediately check the composer identity badge before pressing Enter
-      const preSubmitIdentity = await this.verifyAndSwitchPageIdentity(page, targetPageName, params.pageId);
+      const preSubmitIdentity = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
       if (!preSubmitIdentity.matched) {
         // Abort submission! Clear typed comment
         await page.keyboard.press('Control+A');
         await page.keyboard.press('Backspace');
+        const err = `[Pre-Submit Guard] Từ chối gửi: Danh tính composer bị thay đổi ngay trước khi gửi (${preSubmitIdentity.error || 'không khớp Page'}).`;
         return {
+          success: false,
           status: 'rejected',
-          errorMessage: `[Pre-Submit Guard] Từ chối gửi: Danh tính composer bị thay đổi ngay trước khi gửi (${preSubmitIdentity.error || 'không khớp Page'}).`,
+          errorMessage: err,
+          error: err,
         };
       }
 
@@ -384,7 +406,7 @@ export class FacebookCommentDispatcher {
         }, {
           fullContent: params.commentContent,
           targetIdentity: targetPageName,
-          targetPageId: params.pageId,
+          targetPageId: effectivePageId,
           preExistingList: preExistingComments,
           submissionTime: submissionTimestamp,
         });
@@ -396,22 +418,31 @@ export class FacebookCommentDispatcher {
 
       if (confirmedComment.found) {
         return {
+          success: true,
           status: 'sent_confirmed',
           commentFacebookId: confirmedComment.commentId,
+          commentId: confirmedComment.commentId,
           permalink: confirmedComment.commentPermalink,
+          commentPermalink: confirmedComment.commentPermalink,
         };
       }
 
+      const recencyErr = 'Đã nhập nội dung và nhấn gửi, nhưng không thể xác thực bình luận mới xuất hiện trong DOM với bằng chứng vừa tạo (recency proof). Trạng thái chuyển thành "uncertain_failed" để nhân viên đối soát, chống gửi trùng.';
       return {
+        success: false,
         status: 'uncertain_failed',
-        errorMessage: 'Đã nhập nội dung và nhấn gửi, nhưng không thể xác thực bình luận mới xuất hiện trong DOM với bằng chứng vừa tạo (recency proof). Trạng thái chuyển thành "uncertain_failed" để nhân viên đối soát, chống gửi trùng.',
+        errorMessage: recencyErr,
+        error: recencyErr,
       };
 
     } catch (err: any) {
       console.error('[Dispatcher] Lỗi trong quá trình dispatch:', err);
+      const playErr = `Lỗi kết nối / Playwright: ${err.message}`;
       return {
+        success: false,
         status: 'uncertain_failed',
-        errorMessage: `Lỗi kết nối / Playwright: ${err.message}`,
+        errorMessage: playErr,
+        error: playErr,
       };
     } finally {
       if (context) await context.close().catch(() => {});
@@ -450,23 +481,22 @@ export class FacebookCommentDispatcher {
             switcherText = switcherEl.getAttribute('aria-label') || switcherEl.textContent || '';
           }
 
-          // Collect author links and data-page-id attributes near comment input
+          // Collect author links and data-page-id attributes strictly from the composer avatar/switcher
           const collectedLinks: string[] = [];
-          const anchors = form.querySelectorAll('a[href]');
-          anchors.forEach((a) => {
-            const href = a.getAttribute('href') || '';
-            const text = a.textContent?.trim() || '';
-            const pageIdAttr = a.getAttribute('data-page-id') || a.getAttribute('data-id') || '';
+          const avatarAnchor = avatarImg?.closest('a');
+          if (avatarAnchor) {
+            const href = avatarAnchor.getAttribute('href') || '';
+            const text = avatarAnchor.textContent?.trim() || '';
+            const pageIdAttr = avatarAnchor.getAttribute('data-page-id') || avatarAnchor.getAttribute('data-id') || '';
             if (href || pageIdAttr) {
               collectedLinks.push(`${text} [${href}] ${pageIdAttr ? `[data-page-id=${pageIdAttr}]` : ''}`.trim());
             }
-          });
+          }
 
-          const elementsWithPageId = form.querySelectorAll('[data-page-id], [data-pageid]');
-          elementsWithPageId.forEach((el) => {
-            const pid = el.getAttribute('data-page-id') || el.getAttribute('data-pageid');
+          if (switcherEl) {
+            const pid = switcherEl.getAttribute('data-page-id') || switcherEl.getAttribute('data-id') || '';
             if (pid) collectedLinks.push(`[data-page-id=${pid}]`);
-          });
+          }
 
           const parts = [altText, switcherText, ...collectedLinks].filter(Boolean);
           return parts.length > 0 ? parts.join(' ') : null;
@@ -490,17 +520,26 @@ export class FacebookCommentDispatcher {
         const vLower = voice.toLowerCase();
         const tLower = targetIdentity.toLowerCase();
 
-        // 1. If targetPageId is configured, STRICT EQUALITY IS MANDATORY
-        if (targetPageId) {
-          // Check for conflicts
-          if (structured.conflicts.length > 1 && !structured.conflicts.includes(targetPageId)) {
-            return {
-              matched: false,
-              structured,
-              error: `Xung đột danh tính: Phát hiện nhiều ID khác nhau [${structured.conflicts.join(', ')}] không khớp với Page ID yêu cầu ${targetPageId}.`,
-            };
-          }
+        // 1. Any detected conflicting IDs in composer evidence must be strictly rejected
+        if (structured.conflicts.length > 1) {
+          return {
+            matched: false,
+            structured,
+            error: `Xung đột danh tính: Phát hiện nhiều ID khác nhau [${structured.conflicts.join(', ')}] trong vùng soạn thảo. Dừng gửi để bảo vệ Page.`,
+          };
+        }
 
+        // 2. Personal profile must be rejected
+        if (structured.identityType === 'personal') {
+          return {
+            matched: false,
+            structured,
+            error: `Danh tính hiện tại là Tài khoản cá nhân, không phải Page "${targetIdentity}". Dừng thao tác.`,
+          };
+        }
+
+        // 3. If targetPageId is configured, STRICT EQUALITY IS MANDATORY
+        if (targetPageId) {
           // If explicit ID mismatch (e.g. 222 when target is 111)
           if (structured.activePageId && structured.activePageId !== targetPageId) {
             return {
@@ -511,7 +550,6 @@ export class FacebookCommentDispatcher {
           }
 
           // If targetPageId was NOT found in structured identity
-          // Check exact equality: NOT substring!
           const exactTargetRegex = new RegExp(`\\b${targetPageId}\\b`);
           const hasExactId = exactTargetRegex.test(voice) || structured.activePageId === targetPageId;
 
@@ -525,7 +563,7 @@ export class FacebookCommentDispatcher {
               return {
                 matched: false,
                 structured,
-                error: `Từ chối gửi bình luận: ID trong DOM (${matchedIds.join(', ')}) không khớp Page ID cấu hình ${targetPageId}.`,
+                error: `Phát hiện ID khác [${matchedIds.filter(id => id !== targetPageId).join(', ')}] không trùng khớp với Page ID yêu cầu ${targetPageId}.`,
               };
             }
           }

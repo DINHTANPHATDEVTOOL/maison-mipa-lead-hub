@@ -40,24 +40,17 @@ export class TemplateRepository {
   }): Promise<OutreachTemplate> {
     const pool = getDbPool();
     const serviceId = data.service_id || 'srv-default';
+    const id = data.id || ('tpl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9));
     const res = await pool.query(`
       INSERT INTO outreach_templates (
-        ${data.id ? 'id,' : ''}
+        id,
         service_id, title, template_content, allowed_placeholders, is_approved, version, updated_by_name, created_at, updated_at
       ) VALUES (
-        ${data.id ? '$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()' : '$1, $2, $3, $4, $5, $6, $7, NOW(), NOW()'}
+        $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
       )
       RETURNING *
-    `, data.id ? [
-      data.id,
-      serviceId,
-      data.title.trim(),
-      data.template_content.trim(),
-      JSON.stringify(data.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{uu_dai}']),
-      data.is_approved ?? true,
-      data.version ?? 1,
-      data.updated_by_name || 'Admin',
-    ] : [
+    `, [
+      id,
       serviceId,
       data.title.trim(),
       data.template_content.trim(),

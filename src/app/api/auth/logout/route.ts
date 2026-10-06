@@ -1,17 +1,17 @@
 import { NextResponse } from 'next/server';
-import { revokeToken } from '@/lib/auth';
+import { revokeTokenAsync } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
-  return handleLogout(req);
+  return await handleLogout(req);
 }
 
 export async function GET(req: Request) {
-  return handleLogout(req);
+  return await handleLogout(req);
 }
 
-function handleLogout(req: Request) {
+async function handleLogout(req: Request) {
   // Extract token from Authorization header or cookie
   const authHeader = req.headers.get('authorization');
   let token: string | null = null;
@@ -23,11 +23,11 @@ function handleLogout(req: Request) {
   const match = cookieHeader.match(/mipa_auth_token=([^;]+)/);
   if (match) {
     if (!token) token = match[1];
-    revokeToken(match[1]);
+    await revokeTokenAsync(match[1]);
   }
 
   if (token) {
-    revokeToken(token);
+    await revokeTokenAsync(token);
   }
 
   const response = NextResponse.json({

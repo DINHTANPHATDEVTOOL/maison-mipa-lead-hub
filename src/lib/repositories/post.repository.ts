@@ -1,7 +1,7 @@
 import { FacebookPost, LeadClassification, OutreachInteraction } from '@/types';
-import { getDbPool } from '../db';
+import { getDbPool, withTransaction } from '../db';
 import { canonicalizeFacebookUrl } from '@/worker/crawler';
-import { classifyPostContent } from '@/lib/classifier';
+import { classifyPostContent, ClassificationResult } from '@/lib/classifier';
 import { leadRepo } from './lead.repository';
 import { serviceRepo } from './service.repository';
 import { templateRepo } from './template.repository';
@@ -149,7 +149,7 @@ export class PostRepository {
     author_name?: string;
     content_raw: string;
     posted_at?: string;
-  }): Promise<{ post: FacebookPost; isNew: boolean }> {
+  }): Promise<{ post: FacebookPost; isNew: boolean; classification?: ClassificationResult }> {
     const pool = getDbPool();
     const rawUrl = postData.post_url || '';
     const { canonicalUrl, urlHash, postId: extractedFbId } = canonicalizeFacebookUrl(rawUrl);
@@ -171,87 +171,123 @@ export class PostRepository {
       }
     }
 
-    // 3. Insert new post
+    // 3. Prepare IDs and classification beforehand
     const finalFbId = fbPostId || null;
     const finalUrl = canonicalUrl || rawUrl || `https://facebook.com/posts/${Date.now()}`;
     const finalHash = urlHash || require('crypto').createHash('sha256').update(finalUrl).digest('hex');
+    const postId = postData.id || ('post_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9));
 
-    const insertRes = await pool.query(`
-      INSERT INTO facebook_posts (
-        ${postData.id ? 'id,' : ''}
-        group_id, group_name, facebook_post_id, post_url, post_url_hash, author_name, content_raw, posted_at, detected_at, created_at
-      ) VALUES (
-        ${postData.id ? '$1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW()' : '$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()'}
-      )
-      ON CONFLICT (post_url_hash) DO NOTHING
-      RETURNING *
-    `, postData.id ? [
-      postData.id,
-      postData.group_id || null,
-      postData.group_name || 'Nhóm Facebook',
-      finalFbId,
-      finalUrl,
-      finalHash,
-      postData.author_name || 'Khách Hàng',
-      postData.content_raw.trim(),
-      postData.posted_at ? new Date(postData.posted_at) : null,
-    ] : [
-      postData.group_id || null,
-      postData.group_name || 'Nhóm Facebook',
-      finalFbId,
-      finalUrl,
-      finalHash,
-      postData.author_name || 'Khách Hàng',
-      postData.content_raw.trim(),
-      postData.posted_at ? new Date(postData.posted_at) : null,
-    ]);
-
-    if (insertRes.rows.length === 0) {
-      const existing = await this.getByUrlHash(finalHash);
-      if (existing) return { post: existing, isNew: false };
-    }
-
-    const newPostId = insertRes.rows[0].id;
-
-    // 4. Run AI / Heuristic Classification
     const services = await serviceRepo.getAll().catch(() => []);
     const templates = await templateRepo.getAll().catch(() => []);
     const classification = classifyPostContent(postData.content_raw, services, templates, postData.posted_at);
-    classification.post_id = newPostId;
 
-    const classId = `cls_${newPostId}`;
-    await pool.query(`
-      INSERT INTO lead_classifications (
-        id, post_id, intent, service_detected, location, pax, shooting_date_text,
-        shooting_date_suggested, budget_raw, extra_requirements, confidence_score,
-        classification_reason, suggested_template_id, suggested_comment_text, review_status, created_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
-      )
-      ON CONFLICT (post_id) DO NOTHING
-    `, [
-      classId,
-      newPostId,
-      classification.intent,
-      classification.service_detected,
-      classification.location,
-      classification.pax,
-      classification.shooting_date_text,
-      classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
-      classification.budget_raw,
-      classification.extra_requirements || [],
-      classification.confidence_score,
-      classification.classification_reason,
-      classification.suggested_template_id || null,
-      classification.suggested_comment_text || null,
-      classification.review_status || 'pending',
-    ]);
+    const safeScore = Math.min(100, Math.max(0, Number(classification.confidence_score) || 0));
+    const extraReqs = Array.isArray(classification.extra_requirements)
+      ? classification.extra_requirements.join(', ')
+      : (typeof classification.extra_requirements === 'string' ? classification.extra_requirements : '');
+
+    // 4. Atomic transaction: Insert post + classification
+    const txResult = await withTransaction(async (client) => {
+      const insertRes = await client.query(`
+        INSERT INTO facebook_posts (
+          id, group_id, group_name, facebook_post_id, post_url, post_url_hash, author_name, content_raw, posted_at, detected_at, created_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW()
+        )
+        ON CONFLICT (post_url_hash) DO NOTHING
+        RETURNING *
+      `, [
+        postId,
+        postData.group_id || null,
+        postData.group_name || 'Nhóm Facebook',
+        finalFbId,
+        finalUrl,
+        finalHash,
+        postData.author_name || 'Khách Hàng',
+        postData.content_raw.trim(),
+        postData.posted_at ? new Date(postData.posted_at) : null,
+      ]);
+
+      if (insertRes.rows.length === 0) {
+        // Post already exists in DB
+        const existingRes = await client.query('SELECT * FROM facebook_posts WHERE post_url_hash = $1', [finalHash]);
+        if (existingRes.rows.length > 0) {
+          const existingPost = this.mapRow(existingRes.rows[0]);
+
+          // Auto-heal: If classification is missing for this existing post, insert it now
+          const clsCheck = await client.query('SELECT id FROM lead_classifications WHERE post_id = $1', [existingPost.id]);
+          if (clsCheck.rows.length === 0) {
+            const healedClsId = `cls_${existingPost.id}`;
+            await client.query(`
+              INSERT INTO lead_classifications (
+                id, post_id, intent, service_detected, location, pax, shooting_date_text,
+                shooting_date_suggested, budget_raw, extra_requirements, confidence_score,
+                classification_reason, suggested_template_id, suggested_comment_text, review_status, created_at
+              ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
+              )
+              ON CONFLICT (post_id) DO NOTHING
+            `, [
+              healedClsId,
+              existingPost.id,
+              classification.intent,
+              classification.service_detected,
+              classification.location,
+              classification.pax,
+              classification.shooting_date_text,
+              classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
+              classification.budget_raw,
+              extraReqs,
+              safeScore,
+              classification.classification_reason,
+              classification.suggested_template_id || null,
+              classification.suggested_comment_text || null,
+              classification.review_status || 'pending',
+            ]);
+          }
+          return { post: existingPost, isNew: false, classification };
+        }
+      }
+
+      const createdPost = this.mapRow(insertRes.rows[0]);
+      classification.post_id = createdPost.id;
+      const classId = `cls_${createdPost.id}`;
+
+      await client.query(`
+        INSERT INTO lead_classifications (
+          id, post_id, intent, service_detected, location, pax, shooting_date_text,
+          shooting_date_suggested, budget_raw, extra_requirements, confidence_score,
+          classification_reason, suggested_template_id, suggested_comment_text, review_status, created_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
+        )
+        ON CONFLICT (post_id) DO NOTHING
+      `, [
+        classId,
+        createdPost.id,
+        classification.intent,
+        classification.service_detected,
+        classification.location,
+        classification.pax,
+        classification.shooting_date_text,
+        classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
+        classification.budget_raw,
+        extraReqs,
+        safeScore,
+        classification.classification_reason,
+        classification.suggested_template_id || null,
+        classification.suggested_comment_text || null,
+        classification.review_status || 'pending',
+      ]);
+
+      return { post: createdPost, isNew: true, classification };
+    });
 
     // 5. Automatically create uncontacted CRM Lead if intent matches
-    if (classification.intent === 'looking_for_service') {
+    if (txResult.isNew && classification.intent === 'looking_for_service') {
       try {
         await leadRepo.create({
-          post_id: newPostId,
+          post_id: txResult.post.id,
           customer_name: postData.author_name || 'Khách Hàng Facebook',
           customer_facebook_url: finalUrl,
           service_interest: classification.service_detected || 'Chụp Ảnh Concept',
@@ -263,8 +299,7 @@ export class PostRepository {
       } catch {}
     }
 
-    const fullPost = await this.getById(newPostId);
-    return { post: fullPost!, isNew: true };
+    return { post: txResult.post, isNew: txResult.isNew, classification: txResult.classification };
   }
 
   public async updateClassification(postId: string, classification: LeadClassification): Promise<boolean> {
@@ -305,8 +340,8 @@ export class PostRepository {
       classification.shooting_date_text,
       classification.shooting_date_suggested ? new Date(classification.shooting_date_suggested) : null,
       classification.budget_raw,
-      classification.extra_requirements || [],
-      classification.confidence_score,
+      Array.isArray(classification.extra_requirements) ? classification.extra_requirements.join(', ') : (typeof classification.extra_requirements === 'string' ? classification.extra_requirements : ''),
+      Math.min(100, Math.max(0, Number(classification.confidence_score) || 0)),
       classification.classification_reason,
       classification.suggested_template_id || null,
       classification.suggested_comment_text || null,
@@ -350,6 +385,10 @@ export class PostRepository {
       interaction.error_message || null,
     ]);
     return (res.rowCount ?? 0) > 0;
+  }
+
+  private mapRow(row: any): FacebookPost {
+    return this.mapRowWithRelations(row);
   }
 
   private mapRowWithRelations(row: any): FacebookPost {

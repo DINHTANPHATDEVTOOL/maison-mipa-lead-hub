@@ -10,7 +10,7 @@ export const revalidate = 0;
 
 export async function GET(req: Request) {
   // 1. RBAC Check: Only admin and cskh can export CRM leads
-  const auth = verifyAuth(req, ['admin', 'cskh']);
+  const auth = await verifyAuth(req, ['admin', 'cskh']);
   if (!auth.success) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }

@@ -39,24 +39,16 @@ export class ServiceRepository {
     is_active?: boolean;
   }): Promise<ServiceItem> {
     const pool = getDbPool();
+    const id = data.id || ('srv_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9));
     const res = await pool.query(`
       INSERT INTO services (
-        ${data.id ? 'id,' : ''}
-        code, name, base_price, price_note, service_area, includes_posing_support, is_active, created_at, updated_at
+        id, code, name, base_price, price_note, service_area, includes_posing_support, is_active, created_at, updated_at
       ) VALUES (
-        ${data.id ? '$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()' : '$1, $2, $3, $4, $5, $6, $7, NOW(), NOW()'}
+        $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
       )
       RETURNING *
-    `, data.id ? [
-      data.id,
-      data.code.trim(),
-      data.name.trim(),
-      data.base_price,
-      data.price_note || '',
-      data.service_area || 'TP. Hồ Chí Minh',
-      data.includes_posing_support ?? true,
-      data.is_active ?? true,
-    ] : [
+    `, [
+      id,
       data.code.trim(),
       data.name.trim(),
       data.base_price,

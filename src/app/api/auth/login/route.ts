@@ -46,7 +46,7 @@ export async function POST(req: Request) {
     });
 
     response.cookies.set('mipa_auth_token', user.token, {
-      httpOnly: false,
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       path: '/',

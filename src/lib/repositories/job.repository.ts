@@ -40,6 +40,26 @@ export class JobRepository {
         job_type = EXCLUDED.job_type,
         payload = EXCLUDED.payload,
         run_at = EXCLUDED.run_at,
+        status = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN 'pending'
+          ELSE scheduled_jobs.status
+        END,
+        attempts = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN 0
+          ELSE scheduled_jobs.attempts
+        END,
+        locked_at = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          ELSE scheduled_jobs.locked_at
+        END,
+        locked_by = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          ELSE scheduled_jobs.locked_by
+        END,
+        last_error = CASE 
+          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          ELSE scheduled_jobs.last_error
+        END,
         updated_at = NOW()
       RETURNING *;
     `;
@@ -57,59 +77,84 @@ export class JobRepository {
   }
 
   /**
+   * Recovers jobs stuck in 'running' state after worker crash/kill (lease timeout)
+   */
+  async recoverStuckJobs(timeoutMinutes: number = 5): Promise<number> {
+    const pool = getDbPool();
+    const res = await pool.query(`
+      UPDATE scheduled_jobs
+      SET status = 'pending',
+          locked_at = NULL,
+          locked_by = NULL,
+          updated_at = NOW()
+      WHERE status = 'running'
+        AND locked_at < NOW() - ($1 || ' minutes')::interval
+      RETURNING id;
+    `, [timeoutMinutes]);
+    return res.rowCount || 0;
+  }
+
+  /**
    * Concurrency-safe job claiming using FOR UPDATE SKIP LOCKED inside transaction
    */
   async claimNextJob(workerId: string, supportedTypes?: string[]): Promise<ScheduledJob | null> {
     const { withTransaction } = await import('../db');
 
-    return await withTransaction(async (client) => {
-      let typeClause = '';
-      const selectParams: unknown[] = [];
+    for (let retry = 0; retry < 3; retry++) {
+      const claimed = await withTransaction(async (client) => {
+        let typeClause = '';
+        const selectParams: unknown[] = [];
 
-      if (supportedTypes && supportedTypes.length > 0) {
-        typeClause = `AND job_type = ANY($1::text[])`;
-        selectParams.push(supportedTypes);
-      }
+        if (supportedTypes && supportedTypes.length > 0) {
+          typeClause = `AND job_type = ANY($1::text[])`;
+          selectParams.push(supportedTypes);
+        }
 
-      // Concurrency-safe select: FOR UPDATE SKIP LOCKED on real PostgreSQL, FOR UPDATE on in-memory emulator
-      const lockClause = process.env.DATABASE_URL ? 'FOR UPDATE SKIP LOCKED' : 'FOR UPDATE';
-      const candidateRes = await client.query(
-        `
-        SELECT id FROM scheduled_jobs
-        WHERE status = 'pending'
-          AND run_at <= NOW()
-          AND attempts < max_attempts
-          ${typeClause}
-        ORDER BY run_at ASC, attempts ASC
-        LIMIT 1
-        ${lockClause};
-        `,
-        selectParams
-      );
+        // Concurrency-safe select: FOR UPDATE SKIP LOCKED on real PostgreSQL, FOR UPDATE on in-memory emulator
+        const isRealPostgres = process.env.DATABASE_URL && process.env.DATABASE_URL !== 'memory';
+        const lockClause = isRealPostgres ? 'FOR UPDATE SKIP LOCKED' : 'FOR UPDATE';
+        const candidateRes = await client.query(
+          `
+          SELECT id FROM scheduled_jobs
+          WHERE status = 'pending'
+            AND run_at <= NOW()
+            AND attempts < max_attempts
+            ${typeClause}
+          ORDER BY run_at ASC, attempts ASC
+          LIMIT 1
+          ${lockClause};
+          `,
+          selectParams
+        );
 
-      if (!candidateRes.rows[0]) {
-        return null;
-      }
+        if (!candidateRes.rows[0]) {
+          return null;
+        }
 
-      const candidateId = candidateRes.rows[0].id;
+        const candidateId = candidateRes.rows[0].id;
 
-      // 2. Lock & claim the candidate job
-      const updateRes = await client.query(
-        `
-        UPDATE scheduled_jobs
-        SET status = 'running',
-            locked_at = NOW(),
-            locked_by = $1,
-            attempts = attempts + 1,
-            updated_at = NOW()
-        WHERE id = $2
-        RETURNING *;
-        `,
-        [workerId, candidateId]
-      );
+        // 2. Atomic claim with OCC guard: only update if status is still 'pending'
+        const updateRes = await client.query(
+          `
+          UPDATE scheduled_jobs
+          SET status = 'running',
+              locked_at = NOW(),
+              locked_by = $1,
+              attempts = attempts + 1,
+              updated_at = NOW()
+          WHERE id = $2 AND status = 'pending'
+          RETURNING *;
+          `,
+          [workerId, candidateId]
+        );
 
-      return updateRes.rows[0] || null;
-    });
+        return updateRes.rows[0] || null;
+      });
+
+      if (claimed) return claimed;
+    }
+
+    return null;
   }
 
   async completeJob(id: string, _resultPayload?: any): Promise<boolean> {

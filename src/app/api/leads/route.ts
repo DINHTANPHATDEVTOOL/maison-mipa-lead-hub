@@ -8,7 +8,7 @@ export const revalidate = 0;
 
 export async function GET(req: Request) {
   // Enforce authentication: staff with cskh or admin role can view leads
-  const auth = verifyAuth(req, ['admin', 'cskh']);
+  const auth = await verifyAuth(req, ['admin', 'cskh']);
   if (!auth.success) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
@@ -30,7 +30,7 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     // Enforce authentication: cskh or admin can update lead stage and CRM info
-    const auth = verifyAuth(req, ['admin', 'cskh']);
+    const auth = await verifyAuth(req, ['admin', 'cskh']);
     if (!auth.success) {
       return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
     }

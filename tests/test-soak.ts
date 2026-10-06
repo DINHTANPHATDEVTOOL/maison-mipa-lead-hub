@@ -51,12 +51,18 @@ async function runSoakTest() {
   let duplicateClaims = 0;
   let successfulDispatches = 0;
   let duplicateDispatchesBlocked = 0;
+  const activeClaimedJobs = new Set<string>();
   let startTime = Date.now();
 
   const worker1Loop = async () => {
     while (Date.now() - startTime < durationMs) {
       const job = await jobRepo.claimNextJob('soak-worker-01');
       if (job) {
+        if (activeClaimedJobs.has(job.id)) {
+          duplicateClaims++;
+          console.error(`[CRITICAL] Trùng claim job ${job.id} giữa 2 worker!`);
+        }
+        activeClaimedJobs.add(job.id);
         worker1Claims++;
         await heartbeatRepo.recordWorkerPing('soak-worker-01', 1, true);
 
@@ -72,6 +78,7 @@ async function runSoakTest() {
 
         // Complete job
         await jobRepo.completeJob(job.id, { postsFound: 1 });
+        activeClaimedJobs.delete(job.id);
       }
       await new Promise(r => setTimeout(r, 50));
     }
@@ -81,6 +88,11 @@ async function runSoakTest() {
     while (Date.now() - startTime < durationMs) {
       const job = await jobRepo.claimNextJob('soak-worker-02');
       if (job) {
+        if (activeClaimedJobs.has(job.id)) {
+          duplicateClaims++;
+          console.error(`[CRITICAL] Trùng claim job ${job.id} giữa 2 worker!`);
+        }
+        activeClaimedJobs.add(job.id);
         worker2Claims++;
         await heartbeatRepo.recordWorkerPing('soak-worker-02', 1, true);
 
@@ -99,6 +111,7 @@ async function runSoakTest() {
 
         // Complete job
         await jobRepo.completeJob(job.id, { postsFound: 1 });
+        activeClaimedJobs.delete(job.id);
       }
       await new Promise(r => setTimeout(r, 50));
     }
@@ -110,14 +123,14 @@ async function runSoakTest() {
   console.log(`  - Worker 1 claimed jobs: ${worker1Claims}`);
   console.log(`  - Worker 2 claimed jobs: ${worker2Claims}`);
   console.log(`  - Duplicate job claims detected: ${duplicateClaims} (Yêu cầu: 0)`);
-  console.log(`  - Successful first-touch dispatches: ${successfulDispatches}`);
-  console.log(`  - Duplicate dispatches successfully blocked: ${duplicateDispatchesBlocked}`);
+  console.log(`  - Successful first-touch dispatches: ${successfulDispatches} (Yêu cầu: 1)`);
+  console.log(`  - Duplicate dispatches successfully blocked: ${duplicateDispatchesBlocked} (Yêu cầu: >= 1)`);
 
-  const passed = duplicateClaims === 0;
+  const passed = duplicateClaims === 0 && successfulDispatches === 1 && duplicateDispatchesBlocked >= 1;
   if (passed) {
-    console.log('\n✓ [PASS] SOAK TEST HOÀN TẤT: Tuyệt đối không trùng job và không trùng tiếp cận!');
+    console.log('\n✓ [PASS] SOAK TEST HOÀN TẤT: Tuyệt đối không trùng job (0 duplicate claims) và duy nhất 1 lần tiếp cận thành công!');
   } else {
-    console.error('\n✗ [FAIL] SOAK TEST THẤT BẠI: Phát hiện tranh chấp hoặc trùng lặp!');
+    console.error('\n✗ [FAIL] SOAK TEST THẤT BẠI: Phát hiện tranh chấp hoặc sai lệch số lần tiếp cận!');
     process.exit(1);
   }
 }

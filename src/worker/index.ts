@@ -1,3 +1,4 @@
+import '../lib/env';
 import { store } from '../lib/store';
 import { groupCrawler } from './crawler';
 import { commentDispatcher } from './dispatcher';
@@ -9,6 +10,7 @@ import { postRepo } from '../lib/repositories/post.repository';
 import { heartbeatRepo } from '../lib/repositories/heartbeat.repository';
 import { jobRepo } from '../lib/repositories/job.repository';
 import { outreachRepo } from '../lib/repositories/outreach.repository';
+import { outreachDispatchService } from '../lib/services/outreach-dispatch.service';
 import { getDbPool } from '../lib/db';
 
 const WORKER_ID = process.env.WORKER_ID || 'worker-ubuntu-central-01';
@@ -111,11 +113,13 @@ async function executeCrawlJob(groupId: string): Promise<number> {
         classification.suggested_comment_text
       ) {
         console.log(`[Worker Auto-Dispatch] Tiến hành đăng bình luận tiếp cận: ${post.post_url}`);
-        await commentDispatcher.dispatchComment({
+        await outreachDispatchService.dispatchOutreach({
           postId: post.id,
-          postUrl: post.post_url,
           commentContent: classification.suggested_comment_text,
-          pageIdentity: 'Maison MIPA',
+          operatorName: 'Worker Tự Động',
+          pageIdentity: process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
+          targetPageId: process.env.FACEBOOK_PAGE_ID,
+          templateId: classification.suggested_template_id || undefined,
         });
       }
     }
@@ -132,6 +136,9 @@ async function processWorkerTick() {
   isRunning = true;
 
   try {
+    // 0. Periodic recovery of stuck jobs (lease timeout after worker crash)
+    await jobRepo.recoverStuckJobs(5).catch(() => 0);
+
     // 1. Enqueue due crawl jobs into DB queue
     await scheduleDueGroupCrawlJobs();
 
@@ -145,8 +152,24 @@ async function processWorkerTick() {
       try {
         if (job.job_type === 'crawl_group' && job.target_id) {
           const newCount = await executeCrawlJob(job.target_id);
-          await jobRepo.completeJob(job.id);
+          await jobRepo.completeJob(job.id, { postsFound: newCount });
           console.log(`[Worker] Hoàn thành job ${job.id}: thu thập ${newCount} bài mới.`);
+        } else if (job.job_type === 'dispatch_outreach' && job.payload) {
+          const payload = typeof job.payload === 'string' ? JSON.parse(job.payload) : job.payload;
+          const dispatchRes = await outreachDispatchService.dispatchOutreach({
+            postId: payload.postId || job.target_id,
+            commentContent: payload.commentContent,
+            operatorName: payload.operatorName || 'Worker Dispatcher',
+            pageIdentity: payload.pageIdentity || process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
+            targetPageId: payload.targetPageId || process.env.FACEBOOK_PAGE_ID,
+            templateId: payload.templateId,
+          });
+          if (dispatchRes.success) {
+            await jobRepo.completeJob(job.id, dispatchRes);
+            console.log(`[Worker] Hoàn thành job dispatch ${job.id}`);
+          } else {
+            throw new Error(dispatchRes.error || 'Thất bại khi dispatch');
+          }
         } else {
           await jobRepo.completeJob(job.id);
         }

@@ -1,3 +1,4 @@
+import '../env';
 import fs from 'fs';
 import path from 'path';
 import { getDbPool } from './index';
@@ -15,7 +16,7 @@ export async function runMigrations(): Promise<{ applied: string[]; skipped: str
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version INT PRIMARY KEY,
           name VARCHAR(255) NOT NULL,
-          applied_at TIMESTAMPTZ
+          applied_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
     } catch (createErr: any) {
@@ -52,14 +53,19 @@ export async function runMigrations(): Promise<{ applied: string[]; skipped: str
       }
 
       console.log(`[Migrations] Đang thực thi migration ${file}...`);
-      let sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+      const rawSql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+
+      // Strip SQL line comments and block comments to preserve CREATE TABLE statements that follow comments
+      const cleanSql = rawSql
+        .replace(/--.*$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
 
       await client.query('BEGIN');
       try {
-        const statements = sql
+        const statements = cleanSql
           .split(';')
           .map((s) => s.trim())
-          .filter((s) => s.length > 0 && !s.startsWith('--'));
+          .filter((s) => s.length > 0);
 
         for (const stmt of statements) {
           if (stmt.toLowerCase().startsWith('create extension')) continue;

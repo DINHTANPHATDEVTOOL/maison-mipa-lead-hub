@@ -8,7 +8,7 @@ export const revalidate = 0;
 
 export async function POST(req: Request) {
   try {
-    const auth = verifyAuth(req, ['admin']);
+    const auth = await verifyAuth(req, ['admin']);
     if (!auth.success) {
       return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
     }

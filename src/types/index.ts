@@ -20,7 +20,9 @@ export type OutreachStatus =
   | 'sending' 
   | 'sent_confirmed' 
   | 'uncertain_failed' 
-  | 'manual_assisted';
+  | 'manual_assisted'
+  | 'failed'
+  | 'rejected';
 
 export type CRMStage = 
   | 'uncontacted'  // Chưa phản hồi

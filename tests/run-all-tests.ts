@@ -6,6 +6,7 @@ const testSuites = [
   { name: 'Phase C: Worker Scheduler & Session Encryption', script: 'tests/test-phase-c-worker.ts' },
   { name: 'Phase D: NLP Heuristics, CRM Pipeline & Formula Guard', script: 'tests/test-phase-d-ui-crm.ts' },
   { name: 'Phase E: Multi-Worker Soak & Concurrency Test', script: 'tests/test-soak.ts' },
+  { name: 'Phase F: Transactional Database Backup & Restore Verification', script: 'tests/test-backup-restore.ts' },
   { name: 'Comprehensive P1/P2 Regression Matrix', script: 'tests/test-e2e-fixes.ts' },
 ];
 

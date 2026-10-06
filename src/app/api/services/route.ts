@@ -8,7 +8,7 @@ export const revalidate = 0;
 
 export async function GET(req: Request) {
   // Allow all authenticated staff to read services
-  const auth = verifyAuth(req);
+  const auth = await verifyAuth(req);
   if (!auth.success) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
@@ -28,7 +28,7 @@ export async function GET(req: Request) {
 export async function PUT(req: Request) {
   try {
     // RBAC: Only Admin can update services and pricing
-    const auth = verifyAuth(req, ['admin']);
+    const auth = await verifyAuth(req, ['admin']);
     if (!auth.success) {
       return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
     }

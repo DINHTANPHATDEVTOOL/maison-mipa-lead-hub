@@ -91,14 +91,13 @@ export function revokeToken(token: string): void {
 
     const tokenHash = crypto.createHash('sha256').update(t).digest('hex');
 
-    // Persist to PostgreSQL database asynchronously
-    try {
-      // Dynamic import or direct call to authRepo
-      const { authRepo } = require('./repositories/auth.repository');
-      authRepo.revokeToken(t).catch((err: any) => {
-        // Log silently if DB is in migration or startup
-      });
-    } catch {}
+    // Trigger async DB persistence in background
+    (async () => {
+      try {
+        const { authRepo } = await import('./repositories/auth.repository');
+        await authRepo.revokeToken(t);
+      } catch {}
+    })();
 
     // 1. ATOMIC RECORD: Write dedicated file per revoked token in data/revoked_tokens/<hash>
     // This is 100% atomic across multiple concurrent processes - no process can overwrite another's revoked token!
@@ -152,6 +151,19 @@ export function revokeToken(token: string): void {
     } catch (e) {
       console.error('[Auth] Lỗi khi ghi lưu revoked_tokens.json:', e);
     }
+  }
+}
+
+export async function revokeTokenAsync(token: string): Promise<void> {
+  revokeToken(token);
+  if (!token || typeof token !== 'string') return;
+  const t = token.trim();
+  if (!t) return;
+  try {
+    const { authRepo } = await import('./repositories/auth.repository');
+    await authRepo.revokeToken(t);
+  } catch (err: any) {
+    console.warn('[Auth] Không thể ghi revoked token vào database:', err?.message);
   }
 }
 
@@ -278,7 +290,7 @@ export interface VerifyAuthResult {
 /**
  * Verify authentication and enforce Role-Based Access Control (RBAC)
  */
-export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthResult {
+export async function verifyAuth(req: Request, allowedRoles?: UserRole[]): Promise<VerifyAuthResult> {
   // 1. Check Internal Worker Service Key
   const workerKey = req.headers.get('x-worker-key');
   if (workerKey) {
@@ -333,7 +345,16 @@ export function verifyAuth(req: Request, allowedRoles?: UserRole[]): VerifyAuthR
     };
   }
 
-  // 3. Cryptographically verify signed token
+  // 3. Cryptographically verify signed token & check DB/disk revocation
+  const isRevoked = await isTokenRevokedAsync(token);
+  if (isRevoked) {
+    return {
+      success: false,
+      error: 'Phiên làm việc đã bị thu hồi (đã đăng xuất). Vui lòng đăng nhập lại.',
+      status: 401,
+    };
+  }
+
   const tokenVerify = verifySignedToken(token);
   if (!tokenVerify.valid || !tokenVerify.user) {
     return {
@@ -430,8 +451,8 @@ export function verifyCredentials(credentials: { email?: string; role?: string; 
 /**
  * Legacy compatibility wrapper with strict enforcement
  */
-export function checkRolePermission(req: Request, allowedRoles: UserRole[]): { allowed: boolean; role: UserRole; error?: string; status: number } {
-  const result = verifyAuth(req, allowedRoles);
+export async function checkRolePermission(req: Request, allowedRoles: UserRole[]): Promise<{ allowed: boolean; role: UserRole; error?: string; status: number }> {
+  const result = await verifyAuth(req, allowedRoles);
   if (!result.success) {
     return {
       allowed: false,

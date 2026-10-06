@@ -81,6 +81,7 @@ export class OutreachRepository {
       comment_facebook_id?: string;
       comment_permalink?: string;
       error_message?: string;
+      notes?: string;
     }
   ): Promise<OutreachInteraction | null> {
     const pool = getDbPool();
@@ -98,7 +99,7 @@ export class OutreachRepository {
       status,
       details?.comment_facebook_id || null,
       details?.comment_permalink || null,
-      details?.error_message || null,
+      details?.error_message || details?.notes || null,
       postId,
     ]);
 

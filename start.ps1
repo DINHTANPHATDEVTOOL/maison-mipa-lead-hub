@@ -21,9 +21,21 @@ Write-Host "========================================================" -Foregroun
 Write-Host "  KHỞI ĐỘNG MAISON MIPA LEAD HUB (NATIVE WINDOWS)" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
-if (-not (Test-Path ".env")) {
-    Write-Host "[-] Lỗi: Thiếu tệp .env. Vui lòng chạy .\setup.ps1 trước." -ForegroundColor Red
+if (-not (Test-Path ".env") -and -not (Test-Path ".env.local")) {
+    Write-Host "[-] Lỗi: Thiếu tệp .env hoặc .env.local. Vui lòng chạy .\setup.ps1 trước." -ForegroundColor Red
     Exit 1
+}
+
+# Nạp biến môi trường từ .env và .env.local
+@(".env", ".env.local") | ForEach-Object {
+    if (Test-Path $_) {
+        Get-Content $_ | Where-Object { $_ -notmatch '^\s*#' -and $_ -match '=' } | ForEach-Object {
+            $parts = $_ -split '=', 2
+            $key = $parts[0].Trim()
+            $val = $parts[1].Trim().Trim('"').Trim("'")
+            [Environment]::SetEnvironmentVariable($key, $val, "Process")
+        }
+    }
 }
 
 # Tạo thư mục logs
