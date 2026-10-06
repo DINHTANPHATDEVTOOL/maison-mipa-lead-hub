@@ -162,6 +162,14 @@ export class GroupRepository {
     return this.mapRow(res.rows[0]);
   }
 
+  public async updateCheckTimestamps(id: string, lastCheckedAt: string, nextCheckAt: string): Promise<FacebookGroup | null> {
+    return this.update(id, { last_checked_at: lastCheckedAt, next_check_at: nextCheckAt });
+  }
+
+  public async updateStatus(id: string, status: import('@/types').GroupCheckStatus, lastErrorMessage?: string | null): Promise<FacebookGroup | null> {
+    return this.update(id, { status, last_error_message: lastErrorMessage });
+  }
+
   public async delete(id: string): Promise<boolean> {
     const pool = getDbPool();
     const res = await pool.query('DELETE FROM facebook_groups WHERE id = $1', [id]);

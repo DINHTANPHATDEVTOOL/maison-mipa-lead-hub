@@ -16,8 +16,26 @@ export class PostRepository {
     return PostRepository.instance;
   }
 
-  public async getAll(): Promise<FacebookPost[]> {
+  public async getAll(filter?: { intent?: string; reviewStatus?: string; groupId?: string }): Promise<FacebookPost[]> {
     const pool = getDbPool();
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filter?.intent) {
+      params.push(filter.intent);
+      conditions.push(`c.intent = $${params.length}`);
+    }
+    if (filter?.reviewStatus) {
+      params.push(filter.reviewStatus);
+      conditions.push(`c.review_status = $${params.length}`);
+    }
+    if (filter?.groupId) {
+      params.push(filter.groupId);
+      conditions.push(`p.group_id = $${params.length}`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
     const res = await pool.query(`
       SELECT 
         p.id,
@@ -60,8 +78,9 @@ export class PostRepository {
       FROM facebook_posts p
       LEFT JOIN lead_classifications c ON c.post_id = p.id
       LEFT JOIN outreach_interactions o ON o.post_id = p.id
+      ${whereClause}
       ORDER BY p.detected_at DESC
-    `);
+    `, params);
 
     return res.rows.map(this.mapRowWithRelations);
   }

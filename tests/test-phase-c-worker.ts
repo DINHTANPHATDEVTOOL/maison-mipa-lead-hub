@@ -151,7 +151,7 @@ async function runPhaseCTests() {
   const origEnv = process.env.NODE_ENV;
   const origKey = process.env.FACEBOOK_SESSION_ENCRYPTION_KEY;
   try {
-    process.env.NODE_ENV = 'production';
+    (process.env as any).NODE_ENV = 'production';
     delete process.env.FACEBOOK_SESSION_ENCRYPTION_KEY;
     let threw = false;
     try {
@@ -161,7 +161,7 @@ async function runPhaseCTests() {
     }
     assert(threw, 'AUTH-SEC-03: Production mode rejects starting without FACEBOOK_SESSION_ENCRYPTION_KEY');
   } finally {
-    process.env.NODE_ENV = origEnv;
+    (process.env as any).NODE_ENV = origEnv;
     if (origKey) process.env.FACEBOOK_SESSION_ENCRYPTION_KEY = origKey;
   }
 

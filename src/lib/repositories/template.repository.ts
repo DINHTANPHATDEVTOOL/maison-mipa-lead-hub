@@ -30,7 +30,7 @@ export class TemplateRepository {
 
   public async create(data: {
     id?: string;
-    service_id: string;
+    service_id?: string;
     title: string;
     template_content: string;
     allowed_placeholders?: string[];
@@ -39,6 +39,7 @@ export class TemplateRepository {
     updated_by_name?: string;
   }): Promise<OutreachTemplate> {
     const pool = getDbPool();
+    const serviceId = data.service_id || 'srv-default';
     const res = await pool.query(`
       INSERT INTO outreach_templates (
         ${data.id ? 'id,' : ''}
@@ -49,7 +50,7 @@ export class TemplateRepository {
       RETURNING *
     `, data.id ? [
       data.id,
-      data.service_id,
+      serviceId,
       data.title.trim(),
       data.template_content.trim(),
       JSON.stringify(data.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{uu_dai}']),
@@ -57,7 +58,7 @@ export class TemplateRepository {
       data.version ?? 1,
       data.updated_by_name || 'Admin',
     ] : [
-      data.service_id,
+      serviceId,
       data.title.trim(),
       data.template_content.trim(),
       JSON.stringify(data.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{uu_dai}']),

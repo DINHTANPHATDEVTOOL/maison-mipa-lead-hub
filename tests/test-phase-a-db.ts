@@ -37,7 +37,7 @@ async function runPhaseATests() {
   // -------------------------------------------------------------
   console.log('\n[TEST GROUP 1] DB-01: Database Connection & Transaction Isolation');
   const isHealthy = await checkDbHealth();
-  assert(isHealthy, 'DB-01.1: checkDbHealth() returns true');
+  assert(isHealthy.ok, 'DB-01.1: checkDbHealth() returns true');
 
   const pool = getDbPool();
   assert(pool !== null, 'DB-01.2: getDbPool() returns active connection pool');
@@ -90,8 +90,16 @@ async function runPhaseATests() {
   console.log('\n[TEST GROUP 3] DB-03: Optimistic Concurrency Control (OCC) for Templates & CRM Leads');
 
   // 1. Template OCC test
+  await serviceRepo.create({
+    id: 'srv-default',
+    code: 'SRV_DEFAULT',
+    name: 'Dịch vụ mặc định',
+    base_price: 1200000,
+  }).catch(() => {});
+
   const testTpl = await templateRepo.create({
     id: `tpl_occ_${Date.now()}`,
+    service_id: 'srv-default',
     title: 'Mẫu OCC Test',
     template_content: 'Nội dung {gia}',
   });
@@ -152,7 +160,7 @@ async function runPhaseATests() {
     comment_content: 'Chào bạn bên mình gửi giá...',
   });
   assert(!claim2.success, 'DB-04.2: Worker 2 duplicate claim rejected by PostgreSQL unique constraint');
-  assert(claim2.interaction?.id === claim1.interaction.id, 'DB-04.3: Existing interaction returned to caller');
+  assert(Boolean(claim2.interaction?.id && claim2.interaction?.id === claim1.interaction?.id), 'DB-04.3: Existing interaction returned to caller');
 
   // -------------------------------------------------------------
   // AUTH-01 & AUTH-02: Token Revocation Blacklist in Database

@@ -1,4 +1,4 @@
-import { LeadClassification, PostIntent, ServiceItem, OutreachTemplate } from '@/types';
+import { LeadClassification, PostIntent, ServiceItem, OutreachTemplate, PostReviewStatus } from '@/types';
 
 // ==============================================================================
 // VIETNAMESE ACCENT NORMALIZATION HELPER
@@ -106,6 +106,7 @@ const CUSTOMER_LOOKING_KEYWORDS = [
 const ALLOWED_PLACEHOLDERS = ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'];
 
 export interface ClassificationResult {
+  post_id?: string;
   intent: PostIntent;
   service_detected: string | null;
   location: string | null;
@@ -118,6 +119,7 @@ export interface ClassificationResult {
   classification_reason: string;
   suggested_template_id: string | null;
   suggested_comment_text?: string;
+  review_status?: PostReviewStatus;
 }
 
 /**

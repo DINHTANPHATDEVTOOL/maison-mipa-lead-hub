@@ -42,6 +42,13 @@ export class HeartbeatRepository {
     return this.mapRow(res.rows[0]);
   }
 
+  public async recordPing(
+    workerId: string = 'worker-ubuntu-central-01',
+    activeJobs: number = 0
+  ): Promise<WorkerHeartbeat> {
+    return this.recordWorkerPing(workerId, activeJobs, true);
+  }
+
   public async updateOperatingMode(
     mode: 'manual_review' | 'auto_dispatch',
     workerId: string = 'worker-ubuntu-central-01'

@@ -127,6 +127,7 @@ export interface CRMLead {
   booking_date: string | null;
   quoted_amount: number | null;
   notes: string;
+  version?: number;
   created_at: string;
   updated_at: string;
   post_summary?: string;

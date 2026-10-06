@@ -11,13 +11,18 @@ export class LeadRepository {
     return LeadRepository.instance;
   }
 
-  public async getAll(): Promise<CRMLead[]> {
+  public async getAll(filter?: { stage?: string }): Promise<CRMLead[]> {
     const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT id, post_id, customer_name, customer_facebook_url, service_interest, stage, assigned_cskh_name, booking_date, quoted_amount, notes, post_summary, version, created_at, updated_at
-      FROM crm_leads
-      ORDER BY updated_at DESC
-    `);
+    const query = filter?.stage
+      ? `SELECT id, post_id, customer_name, customer_facebook_url, service_interest, stage, assigned_cskh_name, booking_date, quoted_amount, notes, post_summary, version, created_at, updated_at
+         FROM crm_leads
+         WHERE stage = $1
+         ORDER BY updated_at DESC`
+      : `SELECT id, post_id, customer_name, customer_facebook_url, service_interest, stage, assigned_cskh_name, booking_date, quoted_amount, notes, post_summary, version, created_at, updated_at
+         FROM crm_leads
+         ORDER BY updated_at DESC`;
+    const params = filter?.stage ? [filter.stage] : [];
+    const res = await pool.query(query, params);
     return res.rows.map(this.mapRow);
   }
 
@@ -37,9 +42,9 @@ export class LeadRepository {
 
   public async create(data: {
     id?: string;
-    post_id: string;
+    post_id?: string;
     customer_name: string;
-    customer_facebook_url: string;
+    customer_facebook_url?: string;
     service_interest?: string;
     stage?: CRMStage;
     assigned_cskh_name?: string;
@@ -50,6 +55,16 @@ export class LeadRepository {
   }): Promise<CRMLead> {
     const pool = getDbPool();
     const leadId = data.id || `lead_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    let finalPostId = data.post_id;
+    if (!finalPostId) {
+      finalPostId = `post_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await pool.query(`
+        INSERT INTO facebook_posts (id, post_url, post_url_hash, content_raw, author_name, created_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT DO NOTHING
+      `, [finalPostId, data.customer_facebook_url || `https://facebook.com/${finalPostId}`, finalPostId, 'Lead created without initial post', data.customer_name || 'Khách Hàng Facebook']).catch(() => {});
+    }
+
     const res = await pool.query(`
       INSERT INTO crm_leads (
         id,
@@ -60,7 +75,7 @@ export class LeadRepository {
       RETURNING *
     `, [
       leadId,
-      data.post_id || null,
+      finalPostId,
       data.customer_name || 'Khách Hàng Facebook',
       data.customer_facebook_url || '',
       data.service_interest || 'Tư Vấn Chụp Ảnh',

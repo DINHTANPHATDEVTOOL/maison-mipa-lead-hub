@@ -8,8 +8,12 @@
     "start": "next start",
     "worker": "tsx src/worker/index.ts",
     "test": "tsx tests/test-e2e-fixes.ts",
+    "test:all": "tsx tests/run-all-tests.ts",
     "test:auth": "tsx src/worker/test-auth.ts",
-    "test:crawler": "tsx src/worker/test-crawler.ts"
+    "test:crawler": "tsx src/worker/test-crawler.ts",
+    "db:backup": "tsx scripts/backup-db.ts",
+    "db:restore": "tsx scripts/restore-db.ts",
+    "db:migrate": "tsx src/lib/db/migrate.ts"
   },
   "keywords": [],
   "author": "",

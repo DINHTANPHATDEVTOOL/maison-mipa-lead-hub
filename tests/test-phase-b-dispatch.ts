@@ -34,7 +34,7 @@ async function runPhaseBTests() {
   const rawExact = 'Maison MIPA [https://facebook.com/100083281234567] [data-page-id=100083281234567]';
   const idExact = parseStructuredIdentity(rawExact, '100083281234567');
   assert(
-    idExact.activePageId === '100083281234567' && idExact.activeName?.includes('Maison MIPA'),
+    idExact.activePageId === '100083281234567' && Boolean(idExact.activeName?.includes('Maison MIPA')),
     'PAGE-01: Exactly matched Page ID and name'
   );
 
@@ -58,7 +58,7 @@ async function runPhaseBTests() {
   const rawSubstringId = 'Maison MIPA [https://facebook.com/111888] [data-page-id=111888]';
   const idSubstring = parseStructuredIdentity(rawSubstringId, '111');
   assert(
-    idSubstring.activePageId === '111888' && idSubstring.activePageId !== '111',
+    idSubstring.activePageId === '111888' && (idSubstring.activePageId as string) !== '111',
     'PAGE-03: Substring Page ID rejected (111888 is not 111)'
   );
 

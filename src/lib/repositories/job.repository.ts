@@ -112,7 +112,7 @@ export class JobRepository {
     });
   }
 
-  async completeJob(id: string): Promise<boolean> {
+  async completeJob(id: string, _resultPayload?: any): Promise<boolean> {
     const pool = getDbPool();
     const res = await pool.query(
       `
