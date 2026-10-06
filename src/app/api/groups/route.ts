@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { groupRepo } from '@/lib/repositories/group.repository';
 import { store } from '@/lib/store';
 import { verifyAuth } from '@/lib/auth';
 
@@ -11,8 +12,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
 
-  const groups = store.getGroups();
-  return NextResponse.json({ success: true, data: groups });
+  try {
+    const groups = await groupRepo.getAll();
+    return NextResponse.json({ success: true, data: groups });
+  } catch (err: any) {
+    if (process.env.NODE_ENV !== 'production') {
+      return NextResponse.json({ success: true, data: store.getGroups() });
+    }
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -34,7 +42,7 @@ export async function POST(req: Request) {
       cleanUrl = 'https://' + cleanUrl;
     }
 
-    const newGroup = store.addGroup({
+    const newGroup = await groupRepo.create({
       name: body.name.trim(),
       url: cleanUrl,
       check_interval_seconds: Number(body.check_interval_seconds) || 150,
@@ -42,6 +50,17 @@ export async function POST(req: Request) {
       status: 'active',
       can_page_comment: body.can_page_comment !== false,
     });
+
+    if (process.env.NODE_ENV !== 'production') {
+      store.addGroup({
+        name: body.name.trim(),
+        url: cleanUrl,
+        check_interval_seconds: Number(body.check_interval_seconds) || 150,
+        lookback_hours: Number(body.lookback_hours) || 24,
+        status: 'active',
+        can_page_comment: body.can_page_comment !== false,
+      });
+    }
 
     return NextResponse.json({ success: true, data: newGroup });
   } catch (err: any) {

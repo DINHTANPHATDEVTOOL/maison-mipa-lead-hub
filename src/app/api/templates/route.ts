@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { templateRepo } from '@/lib/repositories/template.repository';
 import { store } from '@/lib/store';
 import { verifyAuth } from '@/lib/auth';
 
@@ -12,7 +13,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
 
-  return NextResponse.json({ success: true, data: store.getTemplates() });
+  try {
+    const templates = await templateRepo.getAll();
+    return NextResponse.json({ success: true, data: templates });
+  } catch (err: any) {
+    if (process.env.NODE_ENV !== 'production') {
+      return NextResponse.json({ success: true, data: store.getTemplates() });
+    }
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
 }
 
 export async function PUT(req: Request) {
@@ -35,9 +44,36 @@ export async function PUT(req: Request) {
     if (body.service_id !== undefined) cleanUpdates.service_id = body.service_id;
     cleanUpdates.updated_by_name = auth.user?.name || 'Staff';
 
-    const updated = store.updateTemplate(body.id, cleanUpdates);
+    // If version is provided, enforce OCC checking
+    if (body.version !== undefined) {
+      const occResult = await templateRepo.updateWithOcc(body.id, Number(body.version), cleanUpdates);
+      if (!occResult.success) {
+        if (occResult.current) {
+          return NextResponse.json({
+            success: false,
+            conflict: true,
+            current: occResult.current,
+            error: 'Xung đột phiên bản (OCC Conflict): Mẫu đã bị thay đổi bởi người khác. Vui lòng tải lại dữ liệu mới nhất.',
+          }, { status: 409 });
+        }
+        return NextResponse.json({ success: false, error: 'Không tìm thấy mẫu tiếp cận' }, { status: 404 });
+      }
+
+      if (process.env.NODE_ENV !== 'production') {
+        store.updateTemplate(body.id, cleanUpdates);
+      }
+
+      return NextResponse.json({ success: true, data: occResult.template });
+    }
+
+    // Direct update without OCC version check
+    const updated = await templateRepo.update(body.id, cleanUpdates);
     if (!updated) {
       return NextResponse.json({ success: false, error: 'Không tìm thấy mẫu tiếp cận' }, { status: 404 });
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      store.updateTemplate(body.id, cleanUpdates);
     }
 
     return NextResponse.json({ success: true, data: updated });

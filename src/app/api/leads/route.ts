@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { leadRepo } from '@/lib/repositories/lead.repository';
 import { store } from '@/lib/store';
 import { verifyAuth } from '@/lib/auth';
 
@@ -12,8 +13,18 @@ export async function GET(req: Request) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
 
-  const leads = store.getLeads();
-  return NextResponse.json({ success: true, count: leads.length, data: leads });
+  try {
+    const { searchParams } = new URL(req.url);
+    const stage = searchParams.get('stage') || undefined;
+    const leads = await leadRepo.getAll({ stage });
+    return NextResponse.json({ success: true, count: leads.length, data: leads });
+  } catch (err: any) {
+    if (process.env.NODE_ENV !== 'production') {
+      const leads = store.getLeads();
+      return NextResponse.json({ success: true, count: leads.length, data: leads });
+    }
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
 }
 
 export async function PATCH(req: Request) {
@@ -29,7 +40,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ success: false, error: 'Thiếu ID khách hàng' }, { status: 400 });
     }
 
-    // CRITICAL BUG FIX: Only include keys that are EXPLICITLY provided!
+    // Only include keys that are EXPLICITLY provided!
     // Do NOT pass undefined fields which wipe out notes, quoted_amount, booking_date, or assigned_cskh_name!
     const updates: Record<string, any> = {};
     if (body.stage !== undefined) updates.stage = body.stage;
@@ -41,10 +52,36 @@ export async function PATCH(req: Request) {
     if (body.assigned_cskh_name !== undefined) updates.assigned_cskh_name = body.assigned_cskh_name;
     if (body.service_interest !== undefined) updates.service_interest = body.service_interest;
 
-    const updated = store.updateLead(body.id, updates);
+    // If version is provided, enforce OCC checking
+    if (body.version !== undefined) {
+      const occResult = await leadRepo.updateWithOcc(body.id, Number(body.version), updates);
+      if (!occResult.success) {
+        if (occResult.current) {
+          return NextResponse.json({
+            success: false,
+            conflict: true,
+            current: occResult.current,
+            error: 'Xung đột phiên bản (OCC Conflict): Hồ sơ khách hàng đã bị thay đổi bởi nhân viên khác. Vui lòng tải lại trang.',
+          }, { status: 409 });
+        }
+        return NextResponse.json({ success: false, error: 'Không tìm thấy hồ sơ khách hàng' }, { status: 404 });
+      }
 
+      if (process.env.NODE_ENV !== 'production') {
+        store.updateLead(body.id, updates);
+      }
+
+      return NextResponse.json({ success: true, data: occResult.lead });
+    }
+
+    // Direct update without OCC version check
+    const updated = await leadRepo.update(body.id, updates);
     if (!updated) {
       return NextResponse.json({ success: false, error: 'Không tìm thấy hồ sơ khách hàng' }, { status: 404 });
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      store.updateLead(body.id, updates);
     }
 
     return NextResponse.json({ success: true, data: updated });

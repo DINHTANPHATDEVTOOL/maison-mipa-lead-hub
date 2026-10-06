@@ -115,8 +115,8 @@ function getNextDayOfWeekInVN(targetDayOfWeek: number, baseDate?: string): strin
  */
 export function classifyPostContent(
   rawContent: string,
-  services: ServiceItem[],
-  templates: OutreachTemplate[],
+  services: ServiceItem[] = [],
+  templates: OutreachTemplate[] = [],
   postedAt?: string
 ): ClassificationResult {
   const sanitizedText = sanitizePostContent(rawContent);

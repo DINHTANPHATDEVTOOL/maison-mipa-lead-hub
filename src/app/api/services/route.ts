@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { serviceRepo } from '@/lib/repositories/service.repository';
 import { store } from '@/lib/store';
 import { verifyAuth } from '@/lib/auth';
 
@@ -12,7 +13,16 @@ export async function GET(req: Request) {
     return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
   }
 
-  return NextResponse.json({ success: true, data: store.getServices() });
+  try {
+    const services = await serviceRepo.getAll();
+    return NextResponse.json({ success: true, data: services });
+  } catch (err: any) {
+    // If running in development without DB, fallback to store
+    if (process.env.NODE_ENV !== 'production') {
+      return NextResponse.json({ success: true, data: store.getServices() });
+    }
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
 }
 
 export async function PUT(req: Request) {
@@ -36,9 +46,14 @@ export async function PUT(req: Request) {
     if (body.includes_posing_support !== undefined) cleanUpdates.includes_posing_support = Boolean(body.includes_posing_support);
     if (body.is_active !== undefined) cleanUpdates.is_active = Boolean(body.is_active);
 
-    const updated = store.updateService(body.id, cleanUpdates);
+    const updated = await serviceRepo.update(body.id, cleanUpdates);
     if (!updated) {
       return NextResponse.json({ success: false, error: 'Không tìm thấy dịch vụ' }, { status: 404 });
+    }
+
+    // Keep store synced in dev
+    if (process.env.NODE_ENV !== 'production') {
+      store.updateService(body.id, cleanUpdates);
     }
 
     return NextResponse.json({ success: true, data: updated });

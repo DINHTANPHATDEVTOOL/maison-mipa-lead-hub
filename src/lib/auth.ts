@@ -91,6 +91,15 @@ export function revokeToken(token: string): void {
 
     const tokenHash = crypto.createHash('sha256').update(t).digest('hex');
 
+    // Persist to PostgreSQL database asynchronously
+    try {
+      // Dynamic import or direct call to authRepo
+      const { authRepo } = require('./repositories/auth.repository');
+      authRepo.revokeToken(t).catch((err: any) => {
+        // Log silently if DB is in migration or startup
+      });
+    } catch {}
+
     // 1. ATOMIC RECORD: Write dedicated file per revoked token in data/revoked_tokens/<hash>
     // This is 100% atomic across multiple concurrent processes - no process can overwrite another's revoked token!
     try {
@@ -175,6 +184,19 @@ export function isTokenRevoked(token: string): boolean {
     }
   } catch {}
 
+  return false;
+}
+
+export async function isTokenRevokedAsync(token: string): Promise<boolean> {
+  if (isTokenRevoked(token)) return true;
+  try {
+    const { authRepo } = await import('./repositories/auth.repository');
+    const inDb = await authRepo.isTokenRevoked(token);
+    if (inDb) {
+      REVOKED_TOKENS.add(token.trim());
+      return true;
+    }
+  } catch {}
   return false;
 }
 

@@ -28,6 +28,7 @@ export function canonicalizeFacebookUrl(rawUrl: string): {
   canonicalUrl: string;
   postId?: string;
   postHash: string;
+  urlHash: string;
 } {
   try {
     const url = new URL(rawUrl);
@@ -64,12 +65,14 @@ export function canonicalizeFacebookUrl(rawUrl: string): {
     }
 
     const postHash = crypto.createHash('sha256').update(canonical.toLowerCase()).digest('hex');
-    return { canonicalUrl: canonical, postId, postHash };
+    return { canonicalUrl: canonical, postId, postHash, urlHash: postHash };
   } catch {
     const clean = rawUrl.split('?')[0].replace(/\/$/, '');
+    const postHash = crypto.createHash('sha256').update(clean.toLowerCase()).digest('hex');
     return {
       canonicalUrl: clean,
-      postHash: crypto.createHash('sha256').update(clean.toLowerCase()).digest('hex'),
+      postHash,
+      urlHash: postHash,
     };
   }
 }
