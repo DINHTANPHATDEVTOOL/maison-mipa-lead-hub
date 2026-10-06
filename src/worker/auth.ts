@@ -6,6 +6,53 @@ const SESSION_DIR = path.join(process.cwd(), 'data', 'auth');
 const SESSION_FILE = path.join(SESSION_DIR, 'facebook_storage_state.json');
 const ENCRYPTED_SESSION_FILE = path.join(SESSION_DIR, 'facebook_storage_state.enc');
 
+export function parseAnyCookieOrStorageState(raw: string): { cookies: any[]; origins?: any[] } | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+
+  // 1. Check if JSON format
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return { cookies: parsed };
+      }
+      if (parsed && Array.isArray(parsed.cookies)) {
+        return parsed;
+      }
+    } catch {}
+  }
+
+  // 2. Cookie string format (e.g. "c_user=1000123; xs=2:abc; sb=xyz;") or separated by semicolons/newlines
+  const pairs = trimmed.split(/;|\n/).map((s) => s.trim()).filter(Boolean);
+  const cookies: any[] = [];
+
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx > 0) {
+      const name = pair.substring(0, eqIdx).trim();
+      const value = pair.substring(eqIdx + 1).trim();
+      if (name) {
+        cookies.push({
+          name,
+          value,
+          domain: '.facebook.com',
+          path: '/',
+          httpOnly: false,
+          secure: true,
+          sameSite: 'None',
+        });
+      }
+    }
+  }
+
+  if (cookies.length > 0) {
+    return { cookies, origins: [] };
+  }
+
+  return null;
+}
+
 export class FacebookAuthManager {
   private encryptionKey: string;
 
@@ -97,11 +144,99 @@ export class FacebookAuthManager {
     return null;
   }
 
-  public saveSession(storageStateJson: string): { success: boolean; error?: string } {
+  public getProfileSessionFile(profileId: string): string {
+    const dir = path.join(SESSION_DIR, 'profiles');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return path.join(dir, `${profileId}.enc`);
+  }
+
+  public saveProfileSession(profileId: string, storageStateOrCookie: string): { success: boolean; userId?: string; error?: string } {
     try {
-      const parsed = JSON.parse(storageStateJson);
-      if (!parsed.cookies || !Array.isArray(parsed.cookies)) {
-        return { success: false, error: 'Định dạng storageState không hợp lệ: thiếu mảng cookies.' };
+      const parsed = parseAnyCookieOrStorageState(storageStateOrCookie);
+      if (!parsed || !parsed.cookies || !Array.isArray(parsed.cookies)) {
+        return { success: false, error: 'Định dạng cookie không hợp lệ. Vui lòng dán chuỗi cookie (c_user=...; xs=...) hoặc JSON storageState.' };
+      }
+      const cUser = parsed.cookies.find((c: any) => c.name === 'c_user');
+      const xs = parsed.cookies.find((c: any) => c.name === 'xs');
+      if (!cUser || !xs) {
+        return { success: false, error: 'Thiếu cookie cốt lõi Facebook (cần có ít nhất c_user và xs).' };
+      }
+
+      const normalizedJson = JSON.stringify(parsed);
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', this.getKeyBuffer(), iv);
+      let encrypted = cipher.update(normalizedJson, 'utf8');
+      encrypted = Buffer.concat([encrypted, cipher.final()]);
+      const tag = cipher.getAuthTag();
+
+      const payload = Buffer.concat([iv, tag, encrypted]);
+      const targetPath = this.getProfileSessionFile(profileId);
+      fs.writeFileSync(targetPath, payload, { mode: 0o600 });
+
+      return { success: true, userId: cUser.value };
+    } catch (err: any) {
+      console.error('[AuthManager] Lỗi lưu phiên profile:', err);
+      return { success: false, error: err.message };
+    }
+  }
+
+  public getProfileStorageState(profileId: string): { cookies: any[]; origins?: any[] } | null {
+    const targetPath = this.getProfileSessionFile(profileId);
+    if (fs.existsSync(targetPath)) {
+      try {
+        const payload = fs.readFileSync(targetPath);
+        const iv = payload.subarray(0, 12);
+        const tag = payload.subarray(12, 28);
+        const ciphertext = payload.subarray(28);
+
+        const decipher = crypto.createDecipheriv('aes-256-gcm', this.getKeyBuffer(), iv);
+        decipher.setAuthTag(tag);
+        let decrypted = decipher.update(ciphertext, undefined, 'utf8');
+        decrypted += decipher.final('utf8');
+
+        const parsed = JSON.parse(decrypted);
+        if (parsed && Array.isArray(parsed.cookies)) {
+          const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
+          const hasXs = parsed.cookies.some((c: any) => c.name === 'xs');
+          if (hasCUser && hasXs) return parsed;
+        }
+      } catch (err) {
+        console.error('[AuthManager] Lỗi giải mã phiên profile:', err);
+      }
+    }
+    // Fallback to default single session
+    return this.getStorageState();
+  }
+
+  public deleteProfileSession(profileId: string): void {
+    const targetPath = this.getProfileSessionFile(profileId);
+    if (fs.existsSync(targetPath)) {
+      try { fs.unlinkSync(targetPath); } catch {}
+    }
+  }
+
+  public hasProfileSession(profileId: string): boolean {
+    const targetPath = this.getProfileSessionFile(profileId);
+    if (fs.existsSync(targetPath)) return true;
+    return this.hasStoredSession();
+  }
+
+  public getProfileSummary(profileId: string): { exists: boolean; valid: boolean; userId: string | null } {
+    const state = this.getProfileStorageState(profileId);
+    if (!state) return { exists: false, valid: false, userId: null };
+    const cUser = state.cookies.find((c: any) => c.name === 'c_user');
+    return {
+      exists: true,
+      valid: Boolean(cUser),
+      userId: cUser?.value || null,
+    };
+  }
+
+  public saveSession(storageStateOrCookie: string): { success: boolean; error?: string } {
+    try {
+      const parsed = parseAnyCookieOrStorageState(storageStateOrCookie);
+      if (!parsed || !parsed.cookies || !Array.isArray(parsed.cookies)) {
+        return { success: false, error: 'Định dạng cookie không hợp lệ: vui lòng dán c_user=...; xs=... hoặc JSON.' };
       }
 
       // Check required Facebook cookies
@@ -111,10 +246,11 @@ export class FacebookAuthManager {
         return { success: false, error: 'Thiếu cookie cốt lõi Facebook (c_user hoặc xs).' };
       }
 
+      const normalizedJson = JSON.stringify(parsed);
       // Encrypt with AES-256-GCM + random 12-byte IV + 16-byte Auth Tag
       const iv = crypto.randomBytes(12);
       const cipher = crypto.createCipheriv('aes-256-gcm', this.getKeyBuffer(), iv);
-      let encrypted = cipher.update(storageStateJson, 'utf8');
+      let encrypted = cipher.update(normalizedJson, 'utf8');
       encrypted = Buffer.concat([encrypted, cipher.final()]);
       const tag = cipher.getAuthTag();
 

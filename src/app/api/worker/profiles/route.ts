@@ -50,12 +50,63 @@ export async function POST(req: Request) {
       return NextResponse.json({ success: deleted });
     }
 
-    // Toggle all accounts
-    if (body.action === 'toggle_all') {
-      const targetStatus = body.status || 'online';
-      const profiles = getAllProfiles();
-      const updatedList = profiles.map((p) => updateProfile(p.id, { status: targetStatus }));
-      return NextResponse.json({ success: true, data: updatedList });
+    // Launch Chrome login for a specific profile
+    if (body.action === 'launch_login' && body.id) {
+      const { spawn } = await import('child_process');
+      const path = await import('path');
+      const scriptPath = path.join(process.cwd(), 'scripts', 'facebook-login.ts');
+      const child = spawn('npx', ['tsx', scriptPath, body.id], {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          DISPLAY: process.env.DISPLAY || ':0',
+        },
+      });
+      child.unref();
+
+      return NextResponse.json({
+        success: true,
+        message: `Đã mở cửa sổ Chrome đăng nhập cho thiết bị [${body.id}]. Hãy nhập tài khoản Facebook trên trình duyệt.`,
+      });
+    }
+
+    // Save session storageState JSON for a specific profile
+    if (body.action === 'save_session' && body.id && body.storageStateJson) {
+      const { authManager } = await import('@/worker/auth');
+      const saveRes = authManager.saveProfileSession(body.id, body.storageStateJson);
+      if (!saveRes.success) {
+        return NextResponse.json({ success: false, error: saveRes.error }, { status: 400 });
+      }
+
+      const updated = updateProfile(body.id, {
+        hasSession: true,
+        fbUserId: saveRes.userId,
+        status: 'online',
+        lastAction: `Đã nạp phiên đăng nhập lúc ${new Date().toLocaleTimeString('vi-VN')}`,
+      });
+
+      return NextResponse.json({
+        success: true,
+        message: `Đã lưu và mã hóa phiên đăng nhập cho thiết bị [${body.id}] thành công.`,
+        data: updated,
+      });
+    }
+
+    // Delete session for a specific profile
+    if (body.action === 'delete_session' && body.id) {
+      const { authManager } = await import('@/worker/auth');
+      authManager.deleteProfileSession(body.id);
+      const updated = updateProfile(body.id, {
+        hasSession: false,
+        status: 'offline',
+        lastAction: 'Đã xóa phiên đăng nhập',
+      });
+      return NextResponse.json({
+        success: true,
+        message: `Đã xóa phiên đăng nhập của thiết bị [${body.id}].`,
+        data: updated,
+      });
     }
 
     return NextResponse.json({ success: false, error: 'Hành động không hợp lệ' }, { status: 400 });

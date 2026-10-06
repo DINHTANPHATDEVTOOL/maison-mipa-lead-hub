@@ -118,14 +118,15 @@ export class FacebookCommentDispatcher {
    * Dispatch an outreach comment using real Playwright browser automation
    */
   public async dispatchComment(params: DispatchCommentParams): Promise<DispatchCommentResult> {
-    const sessionSummary = authManager.getSessionSummary();
-    const storageState = authManager.getStorageState();
-    if (!sessionSummary.exists || !sessionSummary.valid || !storageState) {
+    const profileStorage = params.profileId ? authManager.getProfileStorageState(params.profileId) : null;
+    const storageState = params.storageState || profileStorage || authManager.getStorageState();
+
+    if (!storageState) {
       return {
         success: false,
         status: 'rejected',
-        errorMessage: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState). Hệ thống từ chối báo thành công giả khi chưa có quyền truy cập thực tế.',
-        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState).',
+        errorMessage: `Chưa có phiên đăng nhập Facebook hợp lệ cho thiết bị/tài khoản này (${params.profileId || 'mặc định'}). Vui lòng đăng nhập trước khi gửi.`,
+        error: 'Chưa có phiên đăng nhập Facebook hợp lệ.',
         needsAuth: true,
       };
     }
@@ -286,7 +287,7 @@ export class FacebookCommentDispatcher {
       while (Date.now() - startTime < 16000) {
         await page.waitForTimeout(1500);
 
-        confirmedComment = await page.evaluate(({ fullContent, targetIdentity, targetPageId, preExistingList, submissionTime }) => {
+        confirmedComment = await page.evaluate(({ fullContent, targetIdentity, targetPageId, preExistingList, submissionTime, isPersonalAccount }) => {
           const preSet = new Set(preExistingList);
           const commentElements = document.querySelectorAll(
             'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
@@ -326,34 +327,49 @@ export class FacebookCommentDispatcher {
             }
 
             // 3. Author / Page ID verification
-            const authorMatchesName = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
-            let authorMatchesId = true;
-            if (targetPageId) {
-              const authorAnchor = el.querySelector(
-                'h3 a, h4 a, a[role="link"]:not([href*="comment_id="]):not([href*="/posts/"]):not([href*="story_fbid="]), a[data-hovercard*="id="], a[data-profileid], a[data-page-id], a[href*="profile.php"]'
-              ) as HTMLAnchorElement | null;
-              const authorHref = authorAnchor?.href || '';
-              const authorHovercard = authorAnchor?.getAttribute('data-hovercard') || '';
-              const authorDataId = authorAnchor?.getAttribute('data-page-id') || authorAnchor?.getAttribute('data-profileid') || '';
-              const authorInfo = `${authorText} ${authorHref} ${authorHovercard} ${authorDataId}`;
+            let authorMatches = true;
+            if (!isPersonalAccount) {
+              const authorMatchesName = authorText.toLowerCase().includes(targetIdentity.toLowerCase());
+              let authorMatchesId = true;
+              if (targetPageId) {
+                const authorAnchor = el.querySelector(
+                  'h3 a, h4 a, a[role="link"]:not([href*="comment_id="]):not([href*="/posts/"]):not([href*="story_fbid="]), a[data-hovercard*="id="], a[data-profileid], a[data-page-id], a[href*="profile.php"]'
+                ) as HTMLAnchorElement | null;
+                const authorHref = authorAnchor?.href || '';
+                const authorHovercard = authorAnchor?.getAttribute('data-hovercard') || '';
+                const authorDataId = authorAnchor?.getAttribute('data-page-id') || authorAnchor?.getAttribute('data-profileid') || '';
+                const authorInfo = `${authorText} ${authorHref} ${authorHovercard} ${authorDataId}`;
 
-              const authorIdMatch = authorInfo.match(/(?:page\s*id[:=\s]+|\/|id=|user\/)([0-9]{3,})/i) ||
-                                    authorInfo.match(/\b([0-9]{3,})\b/);
-              // Strict equality check: NOT substring or includes!
-              if (authorIdMatch && authorIdMatch[1] !== targetPageId) {
-                authorMatchesId = false; // Conflicting Page ID
-              } else if (authorIdMatch && authorIdMatch[1] === targetPageId) {
-                authorMatchesId = true; // Exact match
-              } else if (authorInfo.includes(targetPageId)) {
-                // Secondary check: verify exact boundary match
-                const exactRegex = new RegExp(`\\b${targetPageId}\\b`);
-                authorMatchesId = exactRegex.test(authorInfo);
-              } else {
-                authorMatchesId = false;
+                const authorIdMatch = authorInfo.match(/(?:page\s*id[:=\s]+|\/|id=|user\/)([0-9]{3,})/i) ||
+                                      authorInfo.match(/\b([0-9]{3,})\b/);
+                // Strict equality check: NOT substring or includes!
+                if (authorIdMatch && authorIdMatch[1] !== targetPageId) {
+                  authorMatchesId = false; // Conflicting Page ID
+                } else if (authorIdMatch && authorIdMatch[1] === targetPageId) {
+                  authorMatchesId = true; // Exact match
+                } else if (authorInfo.includes(targetPageId)) {
+                  // Secondary check: verify exact boundary match
+                  const exactRegex = new RegExp(`\\b${targetPageId}\\b`);
+                  authorMatchesId = exactRegex.test(authorInfo);
+                } else {
+                  authorMatchesId = false;
+                }
+              }
+              authorMatches = authorMatchesName && authorMatchesId;
+            } else {
+              // For personal accounts: if specific targetPageId (FB user id) is provided, verify it if found in author info
+              if (targetPageId) {
+                const authorAnchor = el.querySelector(
+                  'h3 a, h4 a, a[role="link"]:not([href*="comment_id="]):not([href*="/posts/"]):not([href*="story_fbid="]), a[data-hovercard*="id="], a[data-profileid], a[href*="profile.php"]'
+                ) as HTMLAnchorElement | null;
+                const authorInfo = `${authorText} ${authorAnchor?.href || ''} ${authorAnchor?.getAttribute('data-hovercard') || ''}`;
+                const authorIdMatch = authorInfo.match(/(?:user\/|id=|\/)([0-9]{5,})/i);
+                if (authorIdMatch && authorIdMatch[1] !== targetPageId) {
+                  authorMatches = false;
+                }
               }
             }
 
-            const authorMatches = authorMatchesName && authorMatchesId;
             if (!authorMatches) {
               continue;
             }
@@ -423,6 +439,7 @@ export class FacebookCommentDispatcher {
           targetPageId: effectivePageId,
           preExistingList: preExistingComments,
           submissionTime: submissionTimestamp,
+          isPersonalAccount: isPersonal,
         });
 
         if (confirmedComment.found) {

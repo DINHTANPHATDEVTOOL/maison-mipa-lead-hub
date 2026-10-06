@@ -23,13 +23,10 @@ import {
   Wifi,
   Shield,
   User,
-  Layers,
-  Settings,
-  AlertCircle,
-  Clock,
-  ChevronRight,
+  Activity,
   Terminal,
-  Activity
+  LogOut,
+  X
 } from 'lucide-react';
 import { FacebookPost, FacebookGroup, CRMLead, CRMStage } from '@/types';
 import { FacebookProfile } from '@/lib/profiles';
@@ -75,8 +72,13 @@ export default function PhoneFarmControlHub() {
   // Active Tab
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'matrix' | 'posts' | 'crm' | 'groups'>('matrix');
 
-  // Edit / Add Profile Modal
-  const [editingProfile, setEditingProfile] = useState<FacebookProfile | null>(null);
+  // Modal Login For Specific Profile
+  const [loginTargetProfile, setLoginTargetProfile] = useState<FacebookProfile | null>(null);
+  const [rawStorageStateJson, setRawStorageStateJson] = useState('');
+  const [isSavingSession, setIsSavingSession] = useState(false);
+  const [isLaunchingBrowser, setIsLaunchingBrowser] = useState(false);
+
+  // Add Profile Modal
   const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [newProfileType, setNewProfileType] = useState<'personal' | 'page'>('personal');
@@ -151,25 +153,85 @@ export default function PhoneFarmControlHub() {
     }
   };
 
-  // Toggle Profile Status (Online / Idle / Offline)
-  const handleToggleProfileStatus = async (profile: FacebookProfile) => {
-    const nextStatus = profile.status === 'online' ? 'idle' : 'online';
+  // Launch Headed Chrome Login for Specific Profile
+  const handleLaunchBrowserLoginForProfile = async (profileId: string) => {
+    setIsLaunchingBrowser(true);
     try {
       const res = await apiFetch('/api/worker/profiles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'update',
-          id: profile.id,
-          updates: { status: nextStatus },
+          action: 'launch_login',
+          id: profileId,
         }),
       });
       const data = await res.json();
       if (data.success) {
-        setProfiles(prev => prev.map(p => p.id === profile.id ? { ...p, status: nextStatus } : p));
+        alert(data.message);
+      } else {
+        alert('Lỗi: ' + data.error);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      alert('Lỗi: ' + e.message);
+    } finally {
+      setIsLaunchingBrowser(false);
+    }
+  };
+
+  // Save Session StorageState JSON for Specific Profile
+  const handleSaveSessionForProfile = async (profileId: string) => {
+    if (!rawStorageStateJson.trim()) {
+      alert('Vui lòng dán dữ liệu cookie/storageState JSON!');
+      return;
+    }
+
+    setIsSavingSession(true);
+    try {
+      const res = await apiFetch('/api/worker/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_session',
+          id: profileId,
+          storageStateJson: rawStorageStateJson.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(`Đã lưu phiên đăng nhập Facebook cho thiết bị [${profileId}] thành công!`);
+        setLoginTargetProfile(null);
+        setRawStorageStateJson('');
+        loadAllData();
+      } else {
+        alert('Lỗi: ' + data.error);
+      }
+    } catch (e: any) {
+      alert('Lỗi: ' + e.message);
+    } finally {
+      setIsSavingSession(false);
+    }
+  };
+
+  // Delete Session for Specific Profile
+  const handleDeleteSessionForProfile = async (profileId: string) => {
+    if (!confirm('Bạn có chắc chắn muốn đăng xuất tài khoản của thiết bị này?')) return;
+    try {
+      const res = await apiFetch('/api/worker/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete_session',
+          id: profileId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(`Đã đăng xuất tài khoản của thiết bị [${profileId}].`);
+        setLoginTargetProfile(null);
+        loadAllData();
+      }
+    } catch (e: any) {
+      alert('Lỗi: ' + e.message);
     }
   };
 
@@ -190,6 +252,28 @@ export default function PhoneFarmControlHub() {
       if (data.success) {
         setProfiles(prev => prev.map(p => p.id === profile.id ? { ...p, type: nextType } : p));
         setNotice(`Đã chuyển thiết bị [${profile.slot}] sang chế độ: ${nextType === 'personal' ? 'Tài Khoản Cá Nhân' : 'Fanpage'}`);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Toggle Profile Status (Online / Idle / Offline)
+  const handleToggleProfileStatus = async (profile: FacebookProfile) => {
+    const nextStatus = profile.status === 'online' ? 'idle' : 'online';
+    try {
+      const res = await apiFetch('/api/worker/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          id: profile.id,
+          updates: { status: nextStatus },
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setProfiles(prev => prev.map(p => p.id === profile.id ? { ...p, status: nextStatus } : p));
       }
     } catch (e) {
       console.error(e);
@@ -218,13 +302,11 @@ export default function PhoneFarmControlHub() {
   const handleDispatchComment = async (post: FacebookPost, profileId?: string) => {
     if (dispatchingPostId) return;
 
-    // Pick target profile
     let targetProf: FacebookProfile | undefined;
     if (profileId && profileId !== 'auto') {
       targetProf = profiles.find(p => p.id === profileId);
     } else {
-      // Auto pick first ready/online profile
-      targetProf = profiles.find(p => p.status === 'online') || profiles[0];
+      targetProf = profiles.find(p => p.status === 'online' && p.hasSession) || profiles[0];
     }
 
     const commentText = editedComments[post.id] !== undefined
@@ -258,14 +340,18 @@ export default function PhoneFarmControlHub() {
       if (data.success) {
         setNotice(`✓ Đã gửi bình luận tiếp cận thành công bằng [${targetProf?.name || 'Tài khoản'}] (${accountType === 'personal' ? 'Nick Cá Nhân' : 'Page'})! Khách đã được đưa vào CRM.`);
         
-        // Update profile today comment count
         if (targetProf) {
           setProfiles(prev => prev.map(p => p.id === targetProf!.id ? { ...p, todayComments: p.todayComments + 1, lastAction: `Bình luận khách lúc ${new Date().toLocaleTimeString('vi-VN')}` } : p));
         }
 
         loadAllData();
       } else {
-        alert('Lỗi gửi bình luận: ' + data.error);
+        if (data.needsAuth) {
+          if (targetProf) setLoginTargetProfile(targetProf);
+          alert(`Thiết bị [${targetProf?.name || 'này'}] chưa đăng nhập Facebook! Hãy bấm nút Đăng Nhập cho nick này.`);
+        } else {
+          alert('Lỗi gửi bình luận: ' + data.error);
+        }
       }
     } catch (e: any) {
       alert('Lỗi: ' + e.message);
@@ -329,7 +415,7 @@ export default function PhoneFarmControlHub() {
           fbUserId: newProfileUid.trim() || undefined,
           pageId: newProfilePageId.trim() || undefined,
           pageName: newProfileType === 'page' ? newProfileName.trim() : undefined,
-          hasSession: true,
+          hasSession: false,
         }),
       });
       const data = await res.json();
@@ -339,7 +425,7 @@ export default function PhoneFarmControlHub() {
         setNewProfileName('');
         setNewProfileUid('');
         setNewProfilePageId('');
-        setNotice(`Đã thêm thiết bị/tài khoản mới [${data.data.slot}] thành công!`);
+        setNotice(`Đã thêm thiết bị mới [${data.data.slot}]! Hãy bấm Đăng Nhập cho thiết bị này.`);
       }
     } catch (e: any) {
       alert('Lỗi: ' + e.message);
@@ -348,6 +434,7 @@ export default function PhoneFarmControlHub() {
 
   // Quick stats
   const onlineProfilesCount = profiles.filter(p => p.status === 'online').length;
+  const loggedInProfilesCount = profiles.filter(p => p.hasSession).length;
   const personalProfilesCount = profiles.filter(p => p.type === 'personal').length;
   const pageProfilesCount = profiles.filter(p => p.type === 'page').length;
   const totalCommentsSentToday = profiles.reduce((sum, p) => sum + p.todayComments, 0);
@@ -368,21 +455,21 @@ export default function PhoneFarmControlHub() {
                 <span>MULTI-ACCOUNT PHONE MATRIX</span>
               </span>
               <span className="text-zinc-600">•</span>
-              <span className="text-zinc-400 font-medium">Hệ Thống Nuôi & Tương Tác Đa Tài Khoản Facebook</span>
+              <span className="text-zinc-400 font-medium">Quản Lý & Đăng Nhập Riêng Từng Tài Khoản Facebook</span>
             </div>
 
             <h1 className="text-xl sm:text-2xl font-black mt-1 text-white tracking-tight flex items-center space-x-2">
-              <span>Trung Tâm Quản Lý Dàn Nick & Tiếp Cận Khách Hàng</span>
+              <span>Bàn Làm Việc Dàn Nick & Tiếp Cận Khách Hàng</span>
             </h1>
             <p className="text-xs text-zinc-400 mt-0.5">
-              Chạy song song nick cá nhân & Fanpage • Tự động đổi danh tính • Không cần mở terminal • Quét & bình luận thời gian thực
+              Đăng nhập riêng từng nick • Chạy song song nick cá nhân & Fanpage • Bật/Dừng worker 1-click không cần terminal
             </p>
           </div>
 
           {/* Quick Action Controls */}
           <div className="flex flex-wrap items-center gap-2.5">
 
-            {/* Worker On/Off Toggle Button (Direct on UI, No terminal!) */}
+            {/* Worker On/Off Toggle Button */}
             <button
               onClick={handleToggleWorker}
               disabled={isTogglingWorker}
@@ -485,7 +572,7 @@ export default function PhoneFarmControlHub() {
         <div className="p-3.5 rounded-xl bg-[#0b0e17] border border-zinc-800 flex items-center justify-between">
           <div>
             <div className="text-[11px] text-zinc-400 font-medium">Tổng Dàn Thiết Bị / Nick</div>
-            <div className="text-xl font-black text-white mt-0.5">{profiles.length} máy <span className="text-xs text-emerald-400">({onlineProfilesCount} Online)</span></div>
+            <div className="text-xl font-black text-white mt-0.5">{profiles.length} máy <span className="text-xs text-emerald-400">({loggedInProfilesCount} Đã Đăng Nhập)</span></div>
           </div>
           <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
             <Smartphone className="w-5 h-5" />
@@ -542,7 +629,7 @@ export default function PhoneFarmControlHub() {
             }`}
           >
             <Smartphone className="w-4 h-4" />
-            <span>1. DÀN THIẾT BỊ / NICK FACEBOOK ({profiles.length})</span>
+            <span>1. DÀN THIẾT BỊ & ĐĂNG NHẬP RIÊNG TỪNG NICK ({profiles.length})</span>
           </button>
 
           <button
@@ -589,7 +676,7 @@ export default function PhoneFarmControlHub() {
       </div>
 
       {/* =========================================================================
-          3. TAB 1: MA TRẬN MÀN HÌNH ĐIỆN THOẠI (PHONE FARM GRID NHƯ TRONG ẢNH)
+          3. TAB 1: MA TRẬN MÀN HÌNH ĐIỆN THOẠI (CÓ NÚT ĐĂNG NHẬP RIÊNG TỪNG NICK)
       ========================================================================== */}
       {activeWorkspaceTab === 'matrix' && (
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 items-start">
@@ -600,16 +687,19 @@ export default function PhoneFarmControlHub() {
               const isOnline = profile.status === 'online';
               const isBusy = profile.status === 'busy';
               const isPersonal = profile.type === 'personal';
+              const hasSession = profile.hasSession;
 
               return (
                 <div
                   key={profile.id}
-                  className={`relative rounded-3xl p-3.5 transition-all duration-300 flex flex-col justify-between h-[360px] bg-gradient-to-b from-[#0f1420] via-[#090d14] to-[#06080e] border-2 ${
+                  className={`relative rounded-3xl p-3.5 transition-all duration-300 flex flex-col justify-between h-[390px] bg-gradient-to-b from-[#0f1420] via-[#090d14] to-[#06080e] border-2 ${
                     isBusy
                       ? 'border-amber-500/80 shadow-[0_0_20px_rgba(245,158,11,0.25)]'
-                      : isOnline
-                        ? 'border-emerald-500/70 shadow-[0_0_20px_rgba(16,185,129,0.2)]'
-                        : 'border-zinc-800 opacity-70'
+                      : !hasSession
+                        ? 'border-rose-500/60 shadow-[0_0_15px_rgba(244,63,94,0.15)]'
+                        : isOnline
+                          ? 'border-emerald-500/70 shadow-[0_0_20px_rgba(16,185,129,0.2)]'
+                          : 'border-zinc-800 opacity-70'
                   }`}
                 >
                   {/* PHONE TOP NOTCH & STATUS BAR */}
@@ -633,87 +723,98 @@ export default function PhoneFarmControlHub() {
                       </div>
                     </div>
 
-                    {/* ACCOUNT TYPE BADGE & SWITCH BUTTON */}
-                    <div className="mt-2.5 flex items-center justify-between">
+                    {/* ACCOUNT TYPE & LOGIN STATUS BADGES */}
+                    <div className="mt-2.5 flex items-center justify-between gap-1">
                       <button
                         onClick={() => handleToggleAccountType(profile)}
                         title="Bấm để đổi loại tài khoản (Cá nhân / Page)"
-                        className={`text-[11px] px-2.5 py-1 rounded-lg font-bold flex items-center space-x-1 transition-all ${
+                        className={`text-[10px] px-2 py-0.5 rounded-lg font-bold flex items-center space-x-1 transition-all ${
                           isPersonal 
                             ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' 
                             : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 hover:bg-indigo-500/30'
                         }`}
                       >
-                        {isPersonal ? <User className="w-3 h-3 mr-1" /> : <Shield className="w-3 h-3 mr-1" />}
-                        <span>{isPersonal ? 'Tài Khoản Cá Nhân' : 'Fanpage'}</span>
+                        {isPersonal ? <User className="w-3 h-3 mr-0.5" /> : <Shield className="w-3 h-3 mr-0.5" />}
+                        <span>{isPersonal ? 'Cá Nhân' : 'Page'}</span>
                       </button>
 
-                      {/* Status indicator */}
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                        isBusy 
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
-                          : isOnline 
-                            ? 'bg-emerald-500/20 text-emerald-400' 
-                            : 'bg-zinc-800 text-zinc-400'
+                      {/* Login Status Badge */}
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center space-x-1 ${
+                        hasSession 
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                          : 'bg-rose-500/20 text-rose-400 border border-rose-500/30 animate-pulse'
                       }`}>
-                        {isBusy ? 'Đang Chạy' : isOnline ? 'Sẵn Sàng' : 'Tạm Nghỉ'}
+                        <span>{hasSession ? '✓ Đã Đăng Nhập' : '✕ Chưa Đăng Nhập'}</span>
                       </span>
                     </div>
 
-                    {/* ACCOUNT INFO & AVATAR MOCKUP */}
-                    <div className="mt-3 p-2.5 rounded-xl bg-[#070a10] border border-zinc-800/80 space-y-1">
+                    {/* ACCOUNT INFO */}
+                    <div className="mt-2.5 p-2 rounded-xl bg-[#070a10] border border-zinc-800/80 space-y-0.5">
                       <div className="text-xs font-bold text-white truncate" title={profile.name}>
                         {profile.name}
                       </div>
                       <div className="text-[10px] font-mono text-zinc-400 truncate">
-                        UID: {profile.fbUserId || (isPersonal ? '100083281234567' : profile.pageId || 'N/A')}
+                        UID: {profile.fbUserId || (isPersonal ? 'Chưa nạp' : profile.pageId || 'Chưa nạp')}
                       </div>
                     </div>
 
                     {/* LIVE METRICS INSIDE PHONE */}
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-center">
-                      <div className="p-2 rounded-xl bg-zinc-900/60 border border-zinc-800/60">
-                        <div className="text-[10px] text-zinc-400">Hôm nay</div>
-                        <div className="text-sm font-extrabold text-emerald-400">{profile.todayComments} cmt</div>
+                    <div className="mt-2 grid grid-cols-2 gap-1.5 text-center">
+                      <div className="p-1.5 rounded-xl bg-zinc-900/60 border border-zinc-800/60">
+                        <div className="text-[9px] text-zinc-400">Hôm nay</div>
+                        <div className="text-xs font-extrabold text-emerald-400">{profile.todayComments} cmt</div>
                       </div>
-                      <div className="p-2 rounded-xl bg-zinc-900/60 border border-zinc-800/60">
-                        <div className="text-[10px] text-zinc-400">Giới hạn</div>
-                        <div className="text-sm font-extrabold text-zinc-200">{profile.maxDailyComments} cmt</div>
+                      <div className="p-1.5 rounded-xl bg-zinc-900/60 border border-zinc-800/60">
+                        <div className="text-[9px] text-zinc-400">Giới hạn</div>
+                        <div className="text-xs font-extrabold text-zinc-200">{profile.maxDailyComments} cmt</div>
                       </div>
                     </div>
 
                     {/* RECENT ACTION / LOG */}
-                    <div className="mt-2.5 p-2 rounded-lg bg-[#0c1018] border border-zinc-800/60 text-[10px] text-zinc-300 leading-tight">
-                      <div className="text-zinc-500 font-semibold mb-0.5 flex items-center space-x-1">
-                        <Activity className="w-2.5 h-2.5 text-emerald-400" />
-                        <span>Hành động gần nhất:</span>
-                      </div>
+                    <div className="mt-2 p-1.5 rounded-lg bg-[#0c1018] border border-zinc-800/60 text-[10px] text-zinc-300 leading-tight">
                       <div className="truncate text-zinc-300">{profile.lastAction || 'Sẵn sàng nhận việc'}</div>
                     </div>
                   </div>
 
-                  {/* BOTTOM PHONE CONTROLS */}
-                  <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1.5">
+                  {/* BOTTOM PHONE CONTROLS (BAO GỒM NÚT ĐĂNG NHẬP RIÊNG) */}
+                  <div className="pt-2 border-t border-zinc-800/80 space-y-1.5">
+                    
+                    {/* Nút Đăng Nhập Riêng Cho Nick Này */}
                     <button
-                      onClick={() => handleToggleProfileStatus(profile)}
-                      className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${
-                        isOnline 
-                          ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300' 
-                          : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      onClick={() => setLoginTargetProfile(profile)}
+                      className={`w-full py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1 ${
+                        hasSession
+                          ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                          : 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg animate-pulse'
                       }`}
                     >
-                      {isOnline ? 'Tạm Dừng' : 'Bật Máy'}
+                      <Key className="w-3.5 h-3.5" />
+                      <span>{hasSession ? 'Đổi Nick / Nạp Lại FB' : 'ĐĂNG NHẬP NICK NÀY'}</span>
                     </button>
 
-                    <button
-                      onClick={() => {
-                        setActiveWorkspaceTab('posts');
-                        setNotice(`Đã chọn thiết bị [${profile.slot}] để gửi bình luận tiếp theo.`);
-                      }}
-                      className="flex-1 py-1.5 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold transition-colors"
-                    >
-                      Gửi Bài
-                    </button>
+                    <div className="flex items-center justify-between gap-1.5">
+                      <button
+                        onClick={() => handleToggleProfileStatus(profile)}
+                        className={`flex-1 py-1 rounded-lg text-[10px] font-bold transition-colors ${
+                          isOnline 
+                            ? 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400' 
+                            : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        }`}
+                      >
+                        {isOnline ? 'Tạm Dừng' : 'Bật Máy'}
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setActiveWorkspaceTab('posts');
+                          setNotice(`Đã chọn thiết bị [${profile.slot}: ${profile.name}] để gửi bình luận tiếp theo.`);
+                        }}
+                        className="flex-1 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold transition-colors"
+                      >
+                        Gửi Bài
+                      </button>
+                    </div>
+
                   </div>
 
                 </div>
@@ -721,7 +822,7 @@ export default function PhoneFarmControlHub() {
             })}
           </div>
 
-          {/* CỘT PHẢI (1 CỘT): BẢNG ĐIỀU KHIỂN & NHẬT KÝ THỰC THI (SIDEBAR NHƯ TRONG ẢNH) */}
+          {/* CỘT PHẢI (1 CỘT): BẢNG ĐIỀU KHIỂN & NHẬT KÝ THỰC THI (SIDEBAR) */}
           <div className="space-y-4">
             
             {/* Control Console Card */}
@@ -740,13 +841,13 @@ export default function PhoneFarmControlHub() {
                 </div>
 
                 <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/60 border border-zinc-800">
-                  <span className="text-zinc-400">Chế độ phân bổ:</span>
-                  <span className="text-zinc-200 font-semibold">Tự động xoay vòng (Round-Robin)</span>
+                  <span className="text-zinc-400">Đã nạp session:</span>
+                  <span className="text-emerald-400 font-bold">{loggedInProfilesCount} / {profiles.length} máy</span>
                 </div>
 
                 <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/60 border border-zinc-800">
-                  <span className="text-zinc-400">Khoảng cách an toàn:</span>
-                  <span className="text-emerald-400 font-mono font-bold">120s – 180s / cmt</span>
+                  <span className="text-zinc-400">Chế độ phân bổ:</span>
+                  <span className="text-zinc-200 font-semibold">Tự động xoay vòng</span>
                 </div>
               </div>
 
@@ -897,7 +998,7 @@ export default function PhoneFarmControlHub() {
                             <option value="auto">⚡ Tự động chọn nick rảnh</option>
                             {profiles.map((p) => (
                               <option key={p.id} value={p.id}>
-                                [{String(p.slot).padStart(2, '0')}] {p.name} ({p.type === 'personal' ? '👤 Cá nhân' : '🏷️ Page'})
+                                [{String(p.slot).padStart(2, '0')}] {p.name} ({p.type === 'personal' ? '👤 Cá nhân' : '🏷️ Page'}) {p.hasSession ? '✓' : '(Chưa login)'}
                               </option>
                             ))}
                           </select>
@@ -968,7 +1069,92 @@ export default function PhoneFarmControlHub() {
       )}
 
       {/* =========================================================================
-          6. MODAL THÊM TÀI KHOẢN / THIẾT BỊ MỚI
+          6. MODAL ĐĂNG NHẬP FACEBOOK DÀNH RIÊNG CHO TỪNG NICK
+      ========================================================================== */}
+      {loginTargetProfile && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-lg p-6 rounded-3xl bg-[#0e121a] border-2 border-emerald-500/50 shadow-2xl space-y-4">
+            
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <Key className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-white">
+                    Đăng Nhập Facebook Cho Thiết Bị [{String(loginTargetProfile.slot).padStart(2, '0')}]
+                  </h3>
+                  <div className="text-[11px] text-emerald-400 font-semibold">
+                    {loginTargetProfile.name} • {loginTargetProfile.type === 'personal' ? '👤 Tài Khoản Cá Nhân' : '🏷️ Fanpage'}
+                  </div>
+                </div>
+              </div>
+              <button onClick={() => setLoginTargetProfile(null)} className="text-zinc-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Bạn có thể nạp tài khoản Facebook của riêng thiết bị này bằng 1 trong 2 cách:
+            </p>
+
+            {/* Cách 1: Bật trình duyệt tự động */}
+            <div className="p-4 rounded-2xl bg-emerald-950/20 border border-emerald-500/40 space-y-2.5">
+              <div className="font-bold text-xs text-emerald-300 flex items-center space-x-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Cách 1: Bật Trình Duyệt Chrome Đăng Nhập Cho Nick Này (Khuyên Dùng)</span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                Hệ thống sẽ mở một cửa sổ Chrome trên màn hình máy bạn. Bạn đăng nhập tài khoản Facebook của nick này, sau đó phiên sẽ được trích xuất và mã hóa AES-256 gắn riêng cho thiết bị này.
+              </p>
+              <button
+                onClick={() => handleLaunchBrowserLoginForProfile(loginTargetProfile.id)}
+                disabled={isLaunchingBrowser}
+                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors flex items-center justify-center space-x-2 shadow-lg"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{isLaunchingBrowser ? 'Đang mở Chrome...' : `Mở Chrome Đăng Nhập Cho [Máy ${loginTargetProfile.slot}]`}</span>
+              </button>
+            </div>
+
+            {/* Cách 2: Dán trực tiếp storageState JSON */}
+            <div className="p-4 rounded-2xl bg-[#080a10] border border-zinc-800 space-y-2.5">
+              <div className="font-bold text-xs text-zinc-300">
+                Cách 2: Dán Trực Tiếp StorageState / Cookie JSON Của Nick Này
+              </div>
+              <textarea
+                rows={3}
+                value={rawStorageStateJson}
+                onChange={(e) => setRawStorageStateJson(e.target.value)}
+                placeholder='Dán nội dung JSON storageState (chứa cookies c_user, xs)...'
+                className="w-full bg-[#121622] border border-zinc-700 rounded-xl p-2.5 text-xs text-zinc-100 placeholder-zinc-500 font-mono focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                onClick={() => handleSaveSessionForProfile(loginTargetProfile.id)}
+                disabled={isSavingSession}
+                className="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-emerald-300 border border-emerald-500/30 font-bold text-xs transition-colors"
+              >
+                {isSavingSession ? 'Đang lưu...' : 'Lưu Phiên Mã Hóa Cho Máy Này'}
+              </button>
+            </div>
+
+            {/* Nút Đăng Xuất nếu đã có phiên */}
+            {loginTargetProfile.hasSession && (
+              <div className="pt-1 flex justify-end">
+                <button
+                  onClick={() => handleDeleteSessionForProfile(loginTargetProfile.id)}
+                  className="text-xs text-rose-400 hover:text-rose-300 flex items-center space-x-1 underline"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Đăng xuất / Xóa phiên của máy này</span>
+                </button>
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          7. MODAL THÊM TÀI KHOẢN / THIẾT BỊ MỚI
       ========================================================================== */}
       {isAddProfileModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
