@@ -8,6 +8,9 @@ export interface DispatchCommentParams {
   pageIdentity?: string; // Default: 'Maison MIPA'
   pageId?: string; // Facebook Page ID (e.g. '100083281234567')
   targetPageId?: string;
+  accountType?: 'personal' | 'page'; // 'personal' cho phép bình luận bằng tài khoản cá nhân
+  profileId?: string;
+  storageState?: any;
   lookbackTimeoutMs?: number;
 }
 
@@ -144,8 +147,9 @@ export class FacebookCommentDispatcher {
         ],
       });
 
+      const activeStorageState = params.storageState || storageState;
       context = await browser.newContext({
-        storageState: storageState as any,
+        storageState: activeStorageState as any,
         userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 },
         locale: 'vi-VN',
@@ -181,19 +185,26 @@ export class FacebookCommentDispatcher {
 
       await page.waitForTimeout(2500);
 
-      // STEP 1: Verify & Switch Identity to Page (Maison MIPA)
+      // STEP 1: Verify & Switch Identity
+      const isPersonal = params.accountType === 'personal';
       const targetPageName = params.pageIdentity || 'Maison MIPA';
       const effectivePageId = params.targetPageId || params.pageId;
-      console.log(`[Dispatcher] Kiểm tra danh tính bình luận yêu cầu: "${targetPageName}" (Page ID: ${effectivePageId || 'bất kỳ'})`);
-      const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
-      if (!identityResult.matched) {
-        const err = identityResult.error || `Từ chối gửi bình luận: Chưa xác thực được danh tính Page "${targetPageName}". Không được phép gửi bằng tài khoản cá nhân.`;
-        return {
-          success: false,
-          status: 'rejected',
-          errorMessage: err,
-          error: err,
-        };
+
+      if (!isPersonal) {
+        // Enforce Page identity if mode is 'page'
+        console.log(`[Dispatcher] Kiểm tra danh tính Page: "${targetPageName}" (Page ID: ${effectivePageId || 'bất kỳ'})`);
+        const identityResult = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
+        if (!identityResult.matched) {
+          const err = identityResult.error || `Từ chối gửi bình luận: Chưa xác thực được danh tính Page "${targetPageName}".`;
+          return {
+            success: false,
+            status: 'rejected',
+            errorMessage: err,
+            error: err,
+          };
+        }
+      } else {
+        console.log(`[Dispatcher] Chế độ tài khoản cá nhân: Cho phép bình luận trực tiếp dưới tư cách tài khoản Facebook cá nhân.`);
       }
 
       // STEP 2: Locate Comment Box
@@ -242,18 +253,20 @@ export class FacebookCommentDispatcher {
 
       // STEP 3.5: PRE-SUBMIT RE-VERIFICATION of composer identity
       // Immediately check the composer identity badge before pressing Enter
-      const preSubmitIdentity = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
-      if (!preSubmitIdentity.matched) {
-        // Abort submission! Clear typed comment
-        await page.keyboard.press('Control+A');
-        await page.keyboard.press('Backspace');
-        const err = `[Pre-Submit Guard] Từ chối gửi: Danh tính composer bị thay đổi ngay trước khi gửi (${preSubmitIdentity.error || 'không khớp Page'}).`;
-        return {
-          success: false,
-          status: 'rejected',
-          errorMessage: err,
-          error: err,
-        };
+      if (!isPersonal) {
+        const preSubmitIdentity = await this.verifyAndSwitchPageIdentity(page, targetPageName, effectivePageId);
+        if (!preSubmitIdentity.matched) {
+          // Abort submission! Clear typed comment
+          await page.keyboard.press('Control+A');
+          await page.keyboard.press('Backspace');
+          const err = `[Pre-Submit Guard] Từ chối gửi: Danh tính composer bị thay đổi ngay trước khi gửi (${preSubmitIdentity.error || 'không khớp Page'}).`;
+          return {
+            success: false,
+            status: 'rejected',
+            errorMessage: err,
+            error: err,
+          };
+        }
       }
 
       const submissionTimestamp = Date.now();

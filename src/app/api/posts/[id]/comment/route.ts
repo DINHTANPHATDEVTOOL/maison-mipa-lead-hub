@@ -22,6 +22,8 @@ export async function POST(
     const isManualAssisted = body.is_manual_assisted === true;
     const manualProofUrl = body.manual_proof_url;
     const templateId = body.template_id;
+    const accountType = body.account_type || 'page';
+    const profileId = body.profile_id;
 
     if (!commentContent || typeof commentContent !== 'string' || !commentContent.trim()) {
       return NextResponse.json({ success: false, error: 'Nội dung bình luận không được để trống' }, { status: 400 });
@@ -32,6 +34,8 @@ export async function POST(
       postId: params.id,
       commentContent: commentContent.trim(),
       operatorName,
+      accountType,
+      profileId,
       isManual: isManualAssisted,
       manualProofUrl,
       templateId,

@@ -13,6 +13,9 @@ export interface DispatchOutreachOptions {
   operatorName: string;
   pageIdentity?: string;
   targetPageId?: string;
+  accountType?: 'personal' | 'page';
+  profileId?: string;
+  storageState?: any;
   isManual?: boolean;
   manualProofUrl?: string;
   templateId?: string;
@@ -69,6 +72,9 @@ export class OutreachDispatchService {
       operatorName,
       pageIdentity = process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
       targetPageId = process.env.FACEBOOK_PAGE_ID,
+      accountType = 'page',
+      profileId,
+      storageState,
       isManual = false,
       manualProofUrl,
       templateId,
@@ -86,10 +92,10 @@ export class OutreachDispatchService {
     // 2. Validate group commenting permission (can_page_comment)
     if (post.group_id) {
       const group = await groupRepo.getById(post.group_id);
-      if (group && group.can_page_comment === false) {
+      if (group && group.can_page_comment === false && accountType !== 'personal') {
         return {
           success: false,
-          error: `Nhóm facebook "${group.name}" cấm Page bình luận (can_page_comment = false). Dừng gửi để bảo vệ Page.`,
+          error: `Nhóm facebook "${group.name}" cấm Page bình luận (can_page_comment = false). Dừng gửi để bảo vệ Page (Bạn có thể chọn gửi bằng Tài khoản cá nhân).`,
         };
       }
     }
@@ -186,6 +192,9 @@ export class OutreachDispatchService {
         commentContent: commentContent,
         pageIdentity: pageIdentity,
         targetPageId: targetPageId,
+        accountType: accountType,
+        profileId: profileId,
+        storageState: storageState,
       });
 
       if (!dispatchRes.success) {
