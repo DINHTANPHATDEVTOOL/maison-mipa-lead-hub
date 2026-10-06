@@ -118,6 +118,32 @@ export function parseFacebookTimestamp(timeText: string): string {
   return new Date(now).toISOString();
 }
 
+/**
+ * Strict Facebook URL and anti-SSRF validator
+ */
+export function isValidFacebookUrl(rawUrl: string): { valid: boolean; error?: string } {
+  try {
+    const url = new URL(rawUrl.trim());
+    const allowedHosts = ['facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.com'];
+    if (!allowedHosts.includes(url.hostname.toLowerCase())) {
+      return { valid: false, error: `Từ chối URL: Chỉ chấp nhận các tên miền chính thức của Facebook (${allowedHosts.join(', ')}). Host nhận được: ${url.hostname}` };
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      return { valid: false, error: 'Giao thức URL không hợp lệ (yêu cầu https/http).' };
+    }
+    // Anti-SSRF check: Reject local and private IP networks
+    if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost|0\.0\.0\.0|::1)/i.test(url.hostname)) {
+      return { valid: false, error: 'Từ chối URL: Không được phép truy cập mạng nội bộ hoặc địa chỉ loopback.' };
+    }
+    if (!url.pathname.includes('/groups/')) {
+      return { valid: false, error: 'URL không hợp lệ: Phải là đường dẫn nhóm Facebook (/groups/).' };
+    }
+    return { valid: true };
+  } catch {
+    return { valid: false, error: 'Định dạng URL không hợp lệ.' };
+  }
+}
+
 export class FacebookGroupCrawler {
   private headless: boolean;
 
@@ -126,6 +152,16 @@ export class FacebookGroupCrawler {
   }
 
   public async crawlGroup(groupUrl: string, lookbackHours: number = 24): Promise<CrawlGroupResult> {
+    // 1. Strict URL validation & Anti-SSRF
+    const urlValidation = isValidFacebookUrl(groupUrl);
+    if (!urlValidation.valid) {
+      return {
+        success: false,
+        posts: [],
+        error: urlValidation.error || 'URL nhóm không hợp lệ.',
+      };
+    }
+
     const sessionPath = authManager.getSessionPath();
 
     // STRICT CHECK: Reject immediately if no valid session exists. NEVER FAKE DATA!

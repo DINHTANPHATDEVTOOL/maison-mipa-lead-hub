@@ -10,7 +10,12 @@ export class FacebookAuthManager {
   private encryptionKey: string;
 
   constructor(encryptionKey?: string) {
-    const envKey = process.env.FACEBOOK_SESSION_ENCRYPTION_KEY;
+    const envKey = process.env.FACEBOOK_SESSION_ENCRYPTION_KEY?.trim();
+    if (process.env.NODE_ENV === 'production' && !envKey && !encryptionKey) {
+      throw new Error(
+        '[AuthManager Error] Biến môi trường FACEBOOK_SESSION_ENCRYPTION_KEY là bắt buộc trong môi trường Production. Không được sử dụng khóa phái sinh công khai.'
+      );
+    }
     if (!envKey && !encryptionKey) {
       console.warn('[AuthManager WARNING] Chưa cấu hình FACEBOOK_SESSION_ENCRYPTION_KEY trong .env. Sử dụng khóa phái sinh từ môi trường máy.');
     }
@@ -18,6 +23,21 @@ export class FacebookAuthManager {
     if (!fs.existsSync(SESSION_DIR)) {
       fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
     }
+  }
+
+  public deleteSession(): void {
+    try {
+      if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+      if (fs.existsSync(ENCRYPTED_SESSION_FILE)) fs.unlinkSync(ENCRYPTED_SESSION_FILE);
+    } catch (e) {
+      console.error('[AuthManager] Lỗi khi xóa phiên đăng nhập:', e);
+    }
+  }
+
+  public clearPlaintextSession(): void {
+    try {
+      if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+    } catch {}
   }
 
   private deriveMachineKey(): string {
