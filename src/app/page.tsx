@@ -26,6 +26,7 @@ import {
   Activity,
   Terminal,
   LogOut,
+  Search,
   X
 } from 'lucide-react';
 import { FacebookPost, FacebookGroup, CRMLead, CRMStage } from '@/types';
@@ -84,6 +85,21 @@ export default function PhoneFarmControlHub() {
   const [newProfileType, setNewProfileType] = useState<'personal' | 'page'>('personal');
   const [newProfileUid, setNewProfileUid] = useState('');
   const [newProfilePageId, setNewProfilePageId] = useState('');
+
+  // Group Scanner & Auto-Discovery States
+  const [selectedGroupForScan, setSelectedGroupForScan] = useState<string>('all');
+  const [scanLookbackHours, setScanLookbackHours] = useState<number>(24);
+  const [scanProfileId, setScanProfileId] = useState<string>('auto');
+  const [isScanningGroups, setIsScanningGroups] = useState(false);
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all');
+  const [showManualPostInput, setShowManualPostInput] = useState(false);
+
+  // Add Group Modal States
+  const [isAddGroupModalOpen, setIsAddGroupModalOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupUrl, setNewGroupUrl] = useState('');
+  const [newGroupInterval, setNewGroupInterval] = useState('150');
+  const [newGroupLookback, setNewGroupLookback] = useState('24');
 
   // Initial Data Load
   useEffect(() => {
@@ -432,12 +448,78 @@ export default function PhoneFarmControlHub() {
     }
   };
 
+  // Automated Group Scan Trigger
+  const handleScanGroups = async (targetGroupIds?: string[]) => {
+    setIsScanningGroups(true);
+    setNotice(null);
+    try {
+      const ids = targetGroupIds || (selectedGroupForScan === 'all' ? 'all' : [selectedGroupForScan]);
+      const res = await apiFetch('/api/groups/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          groupIds: ids,
+          lookbackHours: scanLookbackHours,
+          profileId: scanProfileId === 'auto' ? undefined : scanProfileId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(data.message || 'Quét bài viết từ nhóm thành công!');
+        await loadAllData();
+        setActiveWorkspaceTab('posts');
+      } else {
+        alert('Lỗi quét nhóm: ' + (data.error || data.message));
+      }
+    } catch (e: any) {
+      alert('Lỗi kết nối: ' + e.message);
+    } finally {
+      setIsScanningGroups(false);
+    }
+  };
+
+  // Add Facebook Group Handler
+  const handleAddGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newGroupName.trim() || !newGroupUrl.trim()) {
+      alert('Vui lòng nhập tên nhóm và đường link Facebook của nhóm!');
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newGroupName.trim(),
+          url: newGroupUrl.trim(),
+          check_interval_seconds: parseInt(newGroupInterval, 10) || 150,
+          lookback_hours: parseInt(newGroupLookback, 10) || 24,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(`Đã thêm nhóm "${data.data.name}" vào danh sách theo dõi.`);
+        setIsAddGroupModalOpen(false);
+        setNewGroupName('');
+        setNewGroupUrl('');
+        await loadAllData();
+      } else {
+        alert('Lỗi: ' + data.error);
+      }
+    } catch (err: any) {
+      alert('Lỗi: ' + err.message);
+    }
+  };
+
   // Quick stats
   const onlineProfilesCount = profiles.filter(p => p.status === 'online').length;
   const loggedInProfilesCount = profiles.filter(p => p.hasSession).length;
   const personalProfilesCount = profiles.filter(p => p.type === 'personal').length;
   const pageProfilesCount = profiles.filter(p => p.type === 'page').length;
   const totalCommentsSentToday = profiles.reduce((sum, p) => sum + p.todayComments, 0);
+  const filteredPosts = selectedGroupFilter === 'all' 
+    ? posts 
+    : posts.filter(p => p.group_id === selectedGroupFilter);
 
   return (
     <div className="min-h-screen bg-[#07090e] text-zinc-100 font-sans pb-16 space-y-5">
@@ -523,44 +605,163 @@ export default function PhoneFarmControlHub() {
           </div>
         )}
 
-        {/* Quick Post Input Bar */}
-        <div className="p-3 rounded-xl bg-[#080a10] border border-zinc-800">
-          <form onSubmit={handleQuickImportPost} className="flex flex-col md:flex-row items-center gap-3">
-            <div className="flex items-center space-x-1.5 shrink-0 text-xs font-bold text-emerald-400">
-              <Sparkles className="w-4 h-4 text-emerald-400" />
-              <span>ĐIỀU PHỐI BÀI VIẾT:</span>
+        {/* =========================================================================
+            TRUNG TÂM QUÉT & TÌM BÀI TỰ ĐỘNG THEO NHÓM FACEBOOK (AUTO DISCOVERY)
+        ========================================================================== */}
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-[#0d121c] via-[#090d14] to-[#0a1018] border-2 border-emerald-500/40 shadow-2xl space-y-3.5">
+          
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-zinc-800/80">
+            <div className="flex items-center space-x-2.5">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
+                <Search className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs sm:text-sm font-black text-white flex items-center space-x-2">
+                  <span>TỰ ĐỘNG TÌM BÀI VIẾT THEO NHÓM FACEBOOK</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30">
+                    Auto Post Discovery
+                  </span>
+                </div>
+                <div className="text-[11px] text-zinc-400">
+                  Bạn chỉ việc chọn các hội nhóm — Hệ thống tự động vào nhóm quét bài mới, nhận diện nhu cầu váy cưới/áo dài/studio và đưa về danh sách.
+                </div>
+              </div>
             </div>
 
-            <input
-              type="text"
-              placeholder="Dán link bài Facebook của khách cần tư vấn (https://facebook.com/...)"
-              value={quickPostUrl}
-              onChange={(e) => setQuickPostUrl(e.target.value)}
-              className="flex-1 w-full bg-[#111420] border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
-            />
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsAddGroupModalOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-xs font-bold transition-colors flex items-center space-x-1.5"
+              >
+                <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                <span>+ Thêm Nhóm Mới</span>
+              </button>
 
-            <select
-              value={quickTargetProfile}
-              onChange={(e) => setQuickTargetProfile(e.target.value)}
-              className="w-full md:w-56 bg-[#111420] border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
-            >
-              <option value="auto">⚡ Tự động chọn nick rảnh</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  [{String(p.slot).padStart(2, '0')}] {p.name} ({p.type === 'personal' ? 'Cá nhân' : 'Page'})
-                </option>
-              ))}
-            </select>
+              <button
+                type="button"
+                onClick={handleToggleWorker}
+                disabled={isTogglingWorker}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 border ${
+                  workerRunning 
+                    ? 'bg-emerald-950/40 text-emerald-300 border-emerald-500/50 hover:bg-rose-950/40 hover:text-rose-300' 
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
+                }`}
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                <span>{workerRunning ? '⚡ Quét Định Kỳ: Đang Bật (Tắt)' : '▶ Bật Quét Tự Động Ngầm'}</span>
+              </button>
+            </div>
+          </div>
 
+          {/* Form Chọn Nhóm & Bấm Quét Tự Động */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+            
+            {/* 1. Chọn nhóm mục tiêu (5 cột) */}
+            <div className="md:col-span-5 space-y-1">
+              <label className="text-[10px] font-bold text-zinc-400 flex items-center space-x-1">
+                <Radio className="w-3 h-3 text-emerald-400" />
+                <span>Nhóm Facebook Cần Tìm Bài:</span>
+              </label>
+              <select
+                value={selectedGroupForScan}
+                onChange={(e) => setSelectedGroupForScan(e.target.value)}
+                className="w-full bg-[#111622] border border-zinc-700 rounded-xl px-3 py-2 text-xs font-semibold text-emerald-300 focus:outline-none focus:border-emerald-500"
+              >
+                <option value="all">⚡ Quét TẤT CẢ các nhóm đang theo dõi ({groups.length} nhóm)</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    📁 {g.name} ({g.total_posts_found || 0} bài đã tìm)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 2. Chọn Nick / Thiết bị đi quét (3 cột) */}
+            <div className="md:col-span-3 space-y-1">
+              <label className="text-[10px] font-bold text-zinc-400 flex items-center space-x-1">
+                <Smartphone className="w-3 h-3 text-emerald-400" />
+                <span>Nick Đi Quét:</span>
+              </label>
+              <select
+                value={scanProfileId}
+                onChange={(e) => setScanProfileId(e.target.value)}
+                className="w-full bg-[#111622] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+              >
+                <option value="auto">⚡ Tự động chọn nick rảnh</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    [{String(p.slot).padStart(2, '0')}] {p.name} {p.hasSession ? '✓' : '(Chưa login)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 3. Khung giờ quét (2 cột) */}
+            <div className="md:col-span-2 space-y-1">
+              <label className="text-[10px] font-bold text-zinc-400 block">
+                Khung Giờ:
+              </label>
+              <select
+                value={scanLookbackHours}
+                onChange={(e) => setScanLookbackHours(Number(e.target.value))}
+                className="w-full bg-[#111622] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+              >
+                <option value={6}>6 giờ qua</option>
+                <option value={12}>12 giờ qua</option>
+                <option value={24}>24 giờ qua (Chuẩn)</option>
+                <option value={48}>48 giờ qua</option>
+              </select>
+            </div>
+
+            {/* 4. Nút Hành Động Lớn (2 cột) */}
+            <div className="md:col-span-2">
+              <button
+                type="button"
+                onClick={() => handleScanGroups()}
+                disabled={isScanningGroups}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-black text-xs transition-all shadow-lg shadow-emerald-950/50 flex items-center justify-center space-x-1.5 disabled:opacity-50"
+              >
+                <Search className={`w-4 h-4 ${isScanningGroups ? 'animate-spin' : ''}`} />
+                <span>{isScanningGroups ? 'Đang Quét...' : 'QUÉT BÀI NGAY'}</span>
+              </button>
+            </div>
+
+          </div>
+
+          {/* Dòng bổ trợ: Nhập bài thủ công khi cần */}
+          <div className="pt-1 flex flex-wrap items-center justify-between text-[11px] text-zinc-500">
             <button
-              type="submit"
-              disabled={isImportingPost}
-              className="w-full md:w-auto px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shrink-0 transition-colors disabled:opacity-50 flex items-center justify-center space-x-1 shadow-md"
+              type="button"
+              onClick={() => setShowManualPostInput(!showManualPostInput)}
+              className="hover:text-zinc-300 underline flex items-center space-x-1"
             >
-              <Send className="w-3.5 h-3.5" />
-              <span>{isImportingPost ? 'Đang thêm...' : 'Phân Tích & Tiếp Cận'}</span>
+              <span>{showManualPostInput ? '▼ Thu gọn nhập bài lẻ' : '▶ Bạn có link bài Facebook cụ thể muốn dán ngay? Bấm vào đây'}</span>
             </button>
-          </form>
+            <span className="text-zinc-500 font-mono text-[10px]">
+              {groups.length} nhóm theo dõi • {posts.length} bài viết đã thu thập
+            </span>
+          </div>
+
+          {showManualPostInput && (
+            <form onSubmit={handleQuickImportPost} className="p-3 rounded-xl bg-[#070a10] border border-zinc-800 flex flex-col sm:flex-row items-center gap-2">
+              <input
+                type="text"
+                placeholder="Dán link bài Facebook lẻ (https://facebook.com/...)"
+                value={quickPostUrl}
+                onChange={(e) => setQuickPostUrl(e.target.value)}
+                className="flex-1 w-full bg-[#111420] border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                type="submit"
+                disabled={isImportingPost}
+                className="w-full sm:w-auto px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-emerald-400 font-bold text-xs shrink-0 transition-colors"
+              >
+                {isImportingPost ? 'Đang thêm...' : 'Phân Tích Bài Lẻ'}
+              </button>
+            </form>
+          )}
+
         </div>
 
       </div>
@@ -641,7 +842,19 @@ export default function PhoneFarmControlHub() {
             }`}
           >
             <MessageSquareCheck className="w-4 h-4" />
-            <span>2. BÀI VIẾT & DUYỆT BÌNH LUẬN ({posts.length})</span>
+            <span>2. BÀI VIẾT ĐÃ TÌM ĐƯỢC ({posts.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveWorkspaceTab('groups')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeWorkspaceTab === 'groups'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-950/40'
+                : 'bg-zinc-900 text-zinc-400 hover:text-white'
+            }`}
+          >
+            <Radio className="w-4 h-4" />
+            <span>3. NHÓM FACEBOOK THEO DÕI ({groups.length})</span>
           </button>
 
           <button
@@ -653,7 +866,7 @@ export default function PhoneFarmControlHub() {
             }`}
           >
             <Users className="w-4 h-4" />
-            <span>3. ĐƯỜNG ỐNG KHÁCH HÀNG CRM ({leads.length})</span>
+            <span>4. ĐƯỜNG ỐNG KHÁCH HÀNG CRM ({leads.length})</span>
           </button>
         </div>
 
@@ -902,122 +1115,297 @@ export default function PhoneFarmControlHub() {
       {/* =========================================================================
           4. TAB 2: DUYỆT BÀI & GỬI BÌNH LUẬN (CHỌN NICK CÁ NHÂN HOẶC PAGE)
       ========================================================================== */}
+      {/* =========================================================================
+          4. TAB 2: DUYỆT BÀI & GỬI BÌNH LUẬN (CHỌN NICK CÁ NHÂN HOẶC PAGE)
+      ========================================================================== */}
       {activeWorkspaceTab === 'posts' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold text-white flex items-center space-x-2">
-              <MessageSquareCheck className="w-4 h-4 text-emerald-400" />
-              <span>Danh Sách Bài Viết Facebook Chờ Tiếp Cận ({posts.length} bài)</span>
-            </h2>
+          {/* Header & Quét Nhóm */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-[#0b0e17] border border-zinc-800">
+            <div>
+              <h2 className="text-base font-bold text-white flex items-center space-x-2">
+                <MessageSquareCheck className="w-4 h-4 text-emerald-400" />
+                <span>Kho Bài Viết Tìm Thấy Từ Các Nhóm ({filteredPosts.length}/{posts.length} bài)</span>
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Các bài viết được hệ thống quét tự động từ các nhóm Facebook và nhận diện nhu cầu khách hàng.
+              </p>
+            </div>
+
+            <button
+              onClick={() => handleScanGroups(selectedGroupFilter === 'all' ? undefined : [selectedGroupFilter])}
+              disabled={isScanningGroups}
+              className="px-3.5 py-2 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 text-xs font-bold transition-all flex items-center space-x-1.5 self-start sm:self-auto"
+            >
+              <Search className={`w-3.5 h-3.5 ${isScanningGroups ? 'animate-spin' : ''}`} />
+              <span>{isScanningGroups ? 'Đang Quét Thêm Bài...' : '🔍 Quét Thêm Bài Từ Nhóm Này'}</span>
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 gap-4">
-            {posts.map((post) => {
-              const cls = post.classification;
-              const isLooking = cls?.intent === 'looking_for_service';
-              const isContacted = post.interaction?.status === 'sent_confirmed';
-              const currentComment = editedComments[post.id] !== undefined
-                ? editedComments[post.id]
-                : (cls?.suggested_comment_text || '');
-
+          {/* Filter chips theo từng nhóm Facebook */}
+          <div className="flex flex-wrap items-center gap-1.5 p-3 rounded-xl bg-[#080b12] border border-zinc-800/80 text-xs">
+            <span className="text-zinc-400 font-bold mr-1">Lọc theo nhóm:</span>
+            <button
+              onClick={() => setSelectedGroupFilter('all')}
+              className={`px-3 py-1 rounded-lg font-bold transition-all ${
+                selectedGroupFilter === 'all'
+                  ? 'bg-emerald-600 text-white shadow'
+                  : 'bg-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+            >
+              Tất cả nhóm ({posts.length})
+            </button>
+            {groups.map(g => {
+              const count = posts.filter(p => p.group_id === g.id).length;
               return (
-                <div key={post.id} className="p-5 rounded-2xl bg-[#0b0e17] border border-zinc-800 space-y-3.5">
-                  
-                  {/* Header bài viết */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
-                    <div>
-                      <div className="flex items-center space-x-2">
-                        <span className="font-bold text-white text-sm">{post.author_name}</span>
-                        <span className="text-zinc-600">•</span>
-                        <span className="text-emerald-400 text-xs font-medium">{post.group_name || 'Bài viết ngoài nhóm'}</span>
-                        <span className="text-zinc-600">•</span>
-                        <span className="text-zinc-400 text-xs">{new Date(post.posted_at).toLocaleString('vi-VN')}</span>
-                      </div>
-                      {post.post_url && (
-                        <a
-                          href={post.post_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-cyan-400 hover:underline flex items-center mt-0.5"
-                        >
-                          <span>Mở bài gốc trên Facebook</span>
-                          <ExternalLink className="w-3 h-3 ml-1" />
-                        </a>
-                      )}
-                    </div>
+                <button
+                  key={g.id}
+                  onClick={() => setSelectedGroupFilter(g.id)}
+                  className={`px-3 py-1 rounded-lg font-bold transition-all ${
+                    selectedGroupFilter === g.id
+                      ? 'bg-emerald-600 text-white shadow'
+                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  📁 {g.name} ({count})
+                </button>
+              );
+            })}
+          </div>
 
-                    <div className="flex items-center space-x-2">
-                      {isLooking && (
-                        <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">
-                          {cls?.service_detected || 'Cần chụp ảnh'}
-                        </span>
-                      )}
-                      {isContacted && (
-                        <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 font-semibold border border-cyan-500/20 flex items-center space-x-1">
-                          <Check className="w-3 h-3" />
-                          <span>Đã Bình Luận</span>
-                        </span>
-                      )}
-                    </div>
-                  </div>
+          {filteredPosts.length === 0 ? (
+            <div className="p-8 rounded-2xl bg-[#0b0e17] border border-zinc-800 text-center space-y-3">
+              <div className="w-12 h-12 rounded-full bg-zinc-800 text-zinc-400 mx-auto flex items-center justify-center">
+                <Search className="w-6 h-6" />
+              </div>
+              <div className="text-sm font-bold text-zinc-200">Chưa có bài viết nào từ nhóm này</div>
+              <p className="text-xs text-zinc-400 max-w-md mx-auto">
+                Hãy nhấn nút bên dưới để bot Playwright tự động quét nhóm và tìm các bài viết có nhu cầu thuê váy/chụp ảnh mới nhất.
+              </p>
+              <button
+                onClick={() => handleScanGroups(selectedGroupFilter === 'all' ? undefined : [selectedGroupFilter])}
+                disabled={isScanningGroups}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
+              >
+                Bắt Đầu Quét Nhóm Ngay
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {filteredPosts.map((post) => {
+                const cls = post.classification;
+                const isLooking = cls?.intent === 'looking_for_service';
+                const isContacted = post.interaction?.status === 'sent_confirmed';
+                const currentComment = editedComments[post.id] !== undefined
+                  ? editedComments[post.id]
+                  : (cls?.suggested_comment_text || '');
 
-                  {/* Nội dung bài viết */}
-                  <div className="p-3 rounded-xl bg-[#07090e] border border-zinc-800/60 text-xs text-zinc-200 leading-relaxed font-sans">
-                    {post.content_raw}
-                  </div>
-
-                  {/* Soạn thảo bình luận */}
-                  <div className="p-4 rounded-xl bg-[#10141f] border border-zinc-700/60 space-y-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-emerald-300 flex items-center space-x-1.5">
-                        <Edit3 className="w-3.5 h-3.5" />
-                        <span>Nội dung bình luận tiếp cận khách:</span>
-                      </span>
-                      <span className="text-zinc-400 text-[11px]">
-                        Điểm tin cậy: <strong className="text-emerald-400">{cls?.confidence_score ? `${cls.confidence_score}%` : '100%'}</strong>
-                      </span>
-                    </div>
-
-                    <textarea
-                      rows={3}
-                      value={currentComment}
-                      onChange={(e) => setEditedComments({ ...editedComments, [post.id]: e.target.value })}
-                      disabled={isContacted || dispatchingPostId === post.id}
-                      className="w-full bg-[#161a24] border border-zinc-700 rounded-xl p-3 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 leading-relaxed"
-                    />
-
-                    {/* Thao tác gửi & Chọn nick */}
-                    {!isContacted && (
-                      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                        <div className="flex items-center space-x-2 text-xs">
-                          <span className="text-zinc-400">Gửi bằng:</span>
-                          <select
-                            onChange={(e) => setSelectedProfileId(e.target.value)}
-                            className="bg-[#0b0e17] border border-zinc-700 rounded-lg px-2.5 py-1 text-xs text-emerald-300 focus:outline-none focus:border-emerald-500"
-                          >
-                            <option value="auto">⚡ Tự động chọn nick rảnh</option>
-                            {profiles.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                [{String(p.slot).padStart(2, '0')}] {p.name} ({p.type === 'personal' ? '👤 Cá nhân' : '🏷️ Page'}) {p.hasSession ? '✓' : '(Chưa login)'}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
+                return (
+                  <div key={post.id} className="p-5 rounded-2xl bg-[#0b0e17] border border-zinc-800 space-y-3.5">
+                    
+                    {/* Header bài viết */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
+                      <div>
                         <div className="flex items-center space-x-2">
-                          <button
-                            onClick={() => handleDispatchComment(post, selectedProfileId)}
-                            disabled={dispatchingPostId === post.id}
-                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-lg flex items-center space-x-1.5 disabled:opacity-50"
-                          >
-                            <Send className={`w-3.5 h-3.5 ${dispatchingPostId === post.id ? 'animate-bounce' : ''}`} />
-                            <span>{dispatchingPostId === post.id ? 'Đang gửi bằng nick...' : 'DUYỆT & GỬI BÌNH LUẬN NGAY'}</span>
-                          </button>
+                          <span className="font-bold text-white text-sm">{post.author_name}</span>
+                          <span className="text-zinc-600">•</span>
+                          <span className="text-emerald-400 text-xs font-medium">{post.group_name || 'Bài viết ngoài nhóm'}</span>
+                          <span className="text-zinc-600">•</span>
+                          <span className="text-zinc-400 text-xs">{new Date(post.posted_at).toLocaleString('vi-VN')}</span>
                         </div>
+                        {post.post_url && (
+                          <a
+                            href={post.post_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-cyan-400 hover:underline flex items-center mt-0.5"
+                          >
+                            <span>Mở bài gốc trên Facebook</span>
+                            <ExternalLink className="w-3 h-3 ml-1" />
+                          </a>
+                        )}
                       </div>
-                    )}
+
+                      <div className="flex items-center space-x-2">
+                        {isLooking && (
+                          <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">
+                            {cls?.service_detected || 'Cần chụp ảnh'}
+                          </span>
+                        )}
+                        {isContacted && (
+                          <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 font-semibold border border-cyan-500/20 flex items-center space-x-1">
+                            <Check className="w-3 h-3" />
+                            <span>Đã Bình Luận</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Nội dung bài viết */}
+                    <div className="p-3 rounded-xl bg-[#07090e] border border-zinc-800/60 text-xs text-zinc-200 leading-relaxed font-sans">
+                      {post.content_raw}
+                    </div>
+
+                    {/* Soạn thảo bình luận */}
+                    <div className="p-4 rounded-xl bg-[#10141f] border border-zinc-700/60 space-y-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-emerald-300 flex items-center space-x-1.5">
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Nội dung bình luận tiếp cận khách:</span>
+                        </span>
+                        <span className="text-zinc-400 text-[11px]">
+                          Điểm tin cậy: <strong className="text-emerald-400">{cls?.confidence_score ? `${cls.confidence_score}%` : '100%'}</strong>
+                        </span>
+                      </div>
+
+                      <textarea
+                        rows={3}
+                        value={currentComment}
+                        onChange={(e) => setEditedComments({ ...editedComments, [post.id]: e.target.value })}
+                        disabled={isContacted || dispatchingPostId === post.id}
+                        className="w-full bg-[#161a24] border border-zinc-700 rounded-xl p-3 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 leading-relaxed"
+                      />
+
+                      {/* Thao tác gửi & Chọn nick */}
+                      {!isContacted && (
+                        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                          <div className="flex items-center space-x-2 text-xs">
+                            <span className="text-zinc-400">Gửi bằng:</span>
+                            <select
+                              onChange={(e) => setSelectedProfileId(e.target.value)}
+                              className="bg-[#0b0e17] border border-zinc-700 rounded-lg px-2.5 py-1 text-xs text-emerald-300 focus:outline-none focus:border-emerald-500"
+                            >
+                              <option value="auto">⚡ Tự động chọn nick rảnh</option>
+                              {profiles.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  [{String(p.slot).padStart(2, '0')}] {p.name} ({p.type === 'personal' ? '👤 Cá nhân' : '🏷️ Page'}) {p.hasSession ? '✓' : '(Chưa login)'}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center space-x-2">
+                            <button
+                              onClick={() => handleDispatchComment(post, selectedProfileId)}
+                              disabled={dispatchingPostId === post.id}
+                              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-lg flex items-center space-x-1.5 disabled:opacity-50"
+                            >
+                              <Send className={`w-3.5 h-3.5 ${dispatchingPostId === post.id ? 'animate-bounce' : ''}`} />
+                              <span>{dispatchingPostId === post.id ? 'Đang gửi bằng nick...' : 'DUYỆT & GỬI BÌNH LUẬN NGAY'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* =========================================================================
+          5. TAB 3: DANH SÁCH NHÓM FACEBOOK THEO DÕI (QUÉT BÀI TỰ ĐỘNG)
+      ========================================================================== */}
+      {activeWorkspaceTab === 'groups' && (
+        <div className="space-y-4">
+          <div className="p-4 rounded-2xl bg-[#0b0e17] border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm sm:text-base font-bold text-white flex items-center space-x-2">
+                <Radio className="w-5 h-5 text-emerald-400" />
+                <span>Các Hội Nhóm Facebook Mục Tiêu Đang Giám Sát ({groups.length} nhóm)</span>
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Bạn chỉ cần thêm hoặc chọn nhóm ở đây. Hệ thống Playwright sẽ tự động vào các nhóm này tìm bài viết khách hàng có nhu cầu.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => setIsAddGroupModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors flex items-center space-x-1.5 shadow-lg shadow-emerald-950/40"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Thêm Nhóm Mới</span>
+              </button>
+
+              <button
+                onClick={() => handleScanGroups()}
+                disabled={isScanningGroups}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-emerald-300 border border-emerald-500/30 font-bold text-xs transition-colors flex items-center space-x-1.5"
+              >
+                <Search className={`w-4 h-4 ${isScanningGroups ? 'animate-spin' : ''}`} />
+                <span>{isScanningGroups ? 'Đang Quét Tất Cả...' : 'Quét Tất Cả Nhóm'}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {groups.map((group) => {
+              const postsCount = posts.filter(p => p.group_id === group.id).length;
+              return (
+                <div key={group.id} className="p-4 rounded-2xl bg-[#0b0e17] border border-zinc-800 space-y-3 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-bold text-white text-sm leading-snug">
+                        {group.name}
+                      </div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
+                        group.status === 'active' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400'
+                      }`}>
+                        {group.status === 'active' ? 'Đang theo dõi' : group.status}
+                      </span>
+                    </div>
+
+                    <a
+                      href={group.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-cyan-400 hover:underline flex items-center space-x-1 truncate"
+                    >
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                      <span className="truncate">{group.url}</span>
+                    </a>
+
+                    <div className="grid grid-cols-2 gap-2 text-center pt-1">
+                      <div className="p-2 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                        <div className="text-[10px] text-zinc-400">Bài đã tìm</div>
+                        <div className="text-sm font-black text-emerald-400">{postsCount} bài</div>
+                      </div>
+                      <div className="p-2 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                        <div className="text-[10px] text-zinc-400">Chu kỳ quét</div>
+                        <div className="text-sm font-bold text-zinc-300">{group.check_interval_seconds || 150}s</div>
+                      </div>
+                    </div>
+
+                    <div className="text-[10px] text-zinc-400 space-y-0.5 pt-1">
+                      <div>Quét gần nhất: <span className="text-zinc-300">{group.last_checked_at ? new Date(group.last_checked_at).toLocaleTimeString('vi-VN') : 'Chưa quét'}</span></div>
+                      <div>Lần tới: <span className="text-emerald-400">{group.next_check_at ? new Date(group.next_check_at).toLocaleTimeString('vi-VN') : 'Sắp tới'}</span></div>
+                    </div>
                   </div>
 
+                  <div className="pt-2 border-t border-zinc-800 flex items-center space-x-2">
+                    <button
+                      onClick={() => handleScanGroups([group.id])}
+                      disabled={isScanningGroups}
+                      className="flex-1 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors flex items-center justify-center space-x-1"
+                    >
+                      <Search className="w-3 h-3" />
+                      <span>Quét Nhóm Này</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setSelectedGroupFilter(group.id);
+                        setActiveWorkspaceTab('posts');
+                      }}
+                      className="py-1.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold transition-colors"
+                    >
+                      Xem Bài ({postsCount})
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -1249,6 +1637,86 @@ export default function PhoneFarmControlHub() {
               </div>
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          8. MODAL THÊM NHÓM FACEBOOK MỚI ĐỂ THEO DÕI & QUÉT BÀI TỰ ĐỘNG
+      ========================================================================== */}
+      {isAddGroupModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-md p-6 rounded-3xl bg-[#0e121a] border border-emerald-500/40 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                <Radio className="w-4 h-4 text-emerald-400" />
+                <span>Thêm Nhóm Facebook Cần Theo Dõi</span>
+              </h3>
+              <button onClick={() => setIsAddGroupModalOpen(false)} className="text-zinc-400 hover:text-white">✕</button>
+            </div>
+
+            <form onSubmit={handleAddGroup} className="space-y-3.5">
+              <div>
+                <label className="text-xs font-semibold text-zinc-300 block mb-1">Tên Nhóm Facebook:</label>
+                <input
+                  type="text"
+                  placeholder="VD: Hội Chụp Ảnh Áo Dài Sài Gòn"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  required
+                  className="w-full bg-[#161b26] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-zinc-300 block mb-1">Đường Link Facebook Nhóm:</label>
+                <input
+                  type="text"
+                  placeholder="VD: https://facebook.com/groups/hoidammechupaodaivn"
+                  value={newGroupUrl}
+                  onChange={(e) => setNewGroupUrl(e.target.value)}
+                  required
+                  className="w-full bg-[#161b26] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-zinc-300 block mb-1">Chu Kỳ Quét (Giây):</label>
+                  <input
+                    type="number"
+                    value={newGroupInterval}
+                    onChange={(e) => setNewGroupInterval(e.target.value)}
+                    className="w-full bg-[#161b26] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-zinc-300 block mb-1">Khung Giờ Quét (Giờ):</label>
+                  <input
+                    type="number"
+                    value={newGroupLookback}
+                    onChange={(e) => setNewGroupLookback(e.target.value)}
+                    className="w-full bg-[#161b26] border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddGroupModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-400 hover:text-white text-xs font-bold"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg"
+                >
+                  Lưu & Theo Dõi
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

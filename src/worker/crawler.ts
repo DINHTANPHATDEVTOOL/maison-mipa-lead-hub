@@ -151,7 +151,7 @@ export class FacebookGroupCrawler {
     this.headless = process.env.PLAYWRIGHT_HEADLESS !== 'false' && headless;
   }
 
-  public async crawlGroup(groupUrl: string, lookbackHours: number = 24): Promise<CrawlGroupResult> {
+  public async crawlGroup(groupUrl: string, lookbackHours: number = 24, profileId?: string): Promise<CrawlGroupResult> {
     // 1. Strict URL validation & Anti-SSRF
     const urlValidation = isValidFacebookUrl(groupUrl);
     if (!urlValidation.valid) {
@@ -162,7 +162,8 @@ export class FacebookGroupCrawler {
       };
     }
 
-    const storageState = authManager.getStorageState();
+    const profileStorage = profileId ? authManager.getProfileStorageState(profileId) : null;
+    const storageState = profileStorage || authManager.getStorageState();
 
     // STRICT CHECK: Reject immediately if no valid session exists. NEVER FAKE DATA!
     if (!storageState) {
@@ -170,7 +171,7 @@ export class FacebookGroupCrawler {
         success: false,
         posts: [],
         needsAuth: true,
-        error: 'Chưa có phiên đăng nhập Facebook hợp lệ (storageState.json hoặc .enc). Không thể quét dữ liệu nhóm thực tế.',
+        error: `Chưa có phiên đăng nhập Facebook hợp lệ ${profileId ? `cho thiết bị [${profileId}]` : '(storageState)'}. Vui lòng đăng nhập tài khoản trước khi quét.`,
       };
     }
 
