@@ -13,6 +13,10 @@ dist/
 data/auth/*.json
 data/auth/*.enc
 data/*.json
+data/*.tmp
+data/commits/
+data/revoked_tokens/
+data/store.lock/
 scratch/
 .env*.local
 .env.production

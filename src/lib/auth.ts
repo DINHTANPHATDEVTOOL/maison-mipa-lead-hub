@@ -47,11 +47,27 @@ const RUNTIME_APP_SECRET = process.env.APP_SECRET?.trim() || crypto.randomBytes(
 const INTERNAL_WORKER_KEY = process.env.INTERNAL_WORKER_KEY?.trim() || null;
 
 // Persistent token revocation blacklist
-const REVOKED_TOKENS_FILE = path.join(process.cwd(), 'data', 'revoked_tokens.json');
+const DATA_DIR = path.join(process.cwd(), 'data');
+const REVOKED_TOKENS_FILE = path.join(DATA_DIR, 'revoked_tokens.json');
+const REVOKED_TOKENS_DIR = path.join(DATA_DIR, 'revoked_tokens');
 const REVOKED_TOKENS = new Set<string>();
 
 function loadRevokedTokens(): void {
   try {
+    if (!fs.existsSync(REVOKED_TOKENS_DIR)) {
+      fs.mkdirSync(REVOKED_TOKENS_DIR, { recursive: true });
+    } else {
+      const files = fs.readdirSync(REVOKED_TOKENS_DIR);
+      for (const f of files) {
+        if (f.endsWith('.tmp')) continue;
+        try {
+          const raw = fs.readFileSync(path.join(REVOKED_TOKENS_DIR, f), 'utf-8');
+          const data = JSON.parse(raw);
+          if (data.token) REVOKED_TOKENS.add(data.token);
+        } catch {}
+      }
+    }
+
     if (fs.existsSync(REVOKED_TOKENS_FILE)) {
       const raw = fs.readFileSync(REVOKED_TOKENS_FILE, 'utf-8');
       const list = JSON.parse(raw);
@@ -70,15 +86,62 @@ loadRevokedTokens();
 export function revokeToken(token: string): void {
   if (token && typeof token === 'string') {
     const t = token.trim();
+    if (!t) return;
     REVOKED_TOKENS.add(t);
+
+    const tokenHash = crypto.createHash('sha256').update(t).digest('hex');
+
+    // 1. ATOMIC RECORD: Write dedicated file per revoked token in data/revoked_tokens/<hash>
+    // This is 100% atomic across multiple concurrent processes - no process can overwrite another's revoked token!
     try {
-      const dataDir = path.dirname(REVOKED_TOKENS_FILE);
-      if (!fs.existsSync(dataDir)) {
-        fs.mkdirSync(dataDir, { recursive: true });
+      if (!fs.existsSync(REVOKED_TOKENS_DIR)) {
+        fs.mkdirSync(REVOKED_TOKENS_DIR, { recursive: true });
       }
-      fs.writeFileSync(REVOKED_TOKENS_FILE, JSON.stringify(Array.from(REVOKED_TOKENS), null, 2), 'utf-8');
+      const tokenFile = path.join(REVOKED_TOKENS_DIR, tokenHash);
+      if (!fs.existsSync(tokenFile)) {
+        const tmp = path.join(REVOKED_TOKENS_DIR, `${tokenHash}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+        fs.writeFileSync(tmp, JSON.stringify({ token: t, tokenHash, revokedAt: Date.now() }), 'utf-8');
+        try {
+          fs.renameSync(tmp, tokenFile);
+        } catch {
+          try { fs.unlinkSync(tmp); } catch {}
+        }
+      }
     } catch (e) {
-      console.error('[Auth] Lỗi khi ghi lưu revoked_tokens:', e);
+      console.error('[Auth] Lỗi khi ghi revoked token file:', e);
+    }
+
+    // 2. Safely merge and update revoked_tokens.json for single-file inspection/compatibility
+    try {
+      const allTokens = new Set<string>([t]);
+      if (fs.existsSync(REVOKED_TOKENS_FILE)) {
+        try {
+          const raw = fs.readFileSync(REVOKED_TOKENS_FILE, 'utf-8');
+          const list = JSON.parse(raw);
+          if (Array.isArray(list)) {
+            list.forEach((item: string) => allTokens.add(item));
+          }
+        } catch {}
+      }
+      if (fs.existsSync(REVOKED_TOKENS_DIR)) {
+        try {
+          const files = fs.readdirSync(REVOKED_TOKENS_DIR);
+          for (const f of files) {
+            if (f.endsWith('.tmp')) continue;
+            try {
+              const content = fs.readFileSync(path.join(REVOKED_TOKENS_DIR, f), 'utf-8');
+              const parsed = JSON.parse(content);
+              if (parsed.token) allTokens.add(parsed.token);
+            } catch {}
+          }
+        } catch {}
+      }
+
+      const tmpJson = path.join(DATA_DIR, `revoked_tokens.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+      fs.writeFileSync(tmpJson, JSON.stringify(Array.from(allTokens), null, 2), 'utf-8');
+      fs.renameSync(tmpJson, REVOKED_TOKENS_FILE);
+    } catch (e) {
+      console.error('[Auth] Lỗi khi ghi lưu revoked_tokens.json:', e);
     }
   }
 }
@@ -86,7 +149,21 @@ export function revokeToken(token: string): void {
 export function isTokenRevoked(token: string): boolean {
   if (!token || typeof token !== 'string') return true;
   const t = token.trim();
+  if (!t) return true;
   if (REVOKED_TOKENS.has(t)) return true;
+
+  const tokenHash = crypto.createHash('sha256').update(t).digest('hex');
+
+  // Check 1: Individual atomic file
+  try {
+    const tokenFile = path.join(REVOKED_TOKENS_DIR, tokenHash);
+    if (fs.existsSync(tokenFile)) {
+      REVOKED_TOKENS.add(t);
+      return true;
+    }
+  } catch {}
+
+  // Check 2: Aggregated JSON file
   try {
     if (fs.existsSync(REVOKED_TOKENS_FILE)) {
       const raw = fs.readFileSync(REVOKED_TOKENS_FILE, 'utf-8');
@@ -97,6 +174,7 @@ export function isTokenRevoked(token: string): boolean {
       }
     }
   } catch {}
+
   return false;
 }
 

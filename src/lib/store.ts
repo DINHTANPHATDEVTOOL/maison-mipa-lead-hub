@@ -16,12 +16,30 @@ import { authManager } from '@/worker/auth';
 import { commentDispatcher } from '@/worker/dispatcher';
 import { canonicalizeFacebookUrl } from '@/worker/crawler';
 import { classifyPostContent } from '@/lib/classifier';
+import { Pool } from 'pg';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_FILE = path.join(DATA_DIR, 'mipa_shared_store.json');
 const STORE_TEMP_FILE = path.join(DATA_DIR, 'mipa_shared_store.tmp');
 const LOCK_DIR = path.join(DATA_DIR, 'store.lock');
 const OWNER_FILE = path.join(LOCK_DIR, 'owner.json');
+const COMMITS_DIR = path.join(DATA_DIR, 'commits');
+
+let pgPool: Pool | null = null;
+if (process.env.DATABASE_URL) {
+  try {
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      connectionTimeoutMillis: 2000,
+      max: 10,
+    });
+    pgPool.on('error', (err) => {
+      console.warn('[Postgres] Pool error:', err.message);
+    });
+  } catch (e: any) {
+    console.warn('[Postgres] Failed to initialize connection pool:', e.message);
+  }
+}
 
 function hashUrl(url: string): string {
   return crypto.createHash('sha256').update(url.trim().toLowerCase()).digest('hex');
@@ -181,6 +199,32 @@ class LeadHubSharedStore {
     throw new Error('[SharedStore] Giao dịch thất bại sau nhiều lần thử lại do xung đột dữ liệu.');
   }
 
+  private syncCommitsDir(currentVersion: number): void {
+    if (!fs.existsSync(COMMITS_DIR)) {
+      try { fs.mkdirSync(COMMITS_DIR, { recursive: true }); } catch {}
+    }
+    for (let v = 1; v <= currentVersion; v++) {
+      const marker = path.join(COMMITS_DIR, `v_${v}.commit`);
+      if (!fs.existsSync(marker)) {
+        try {
+          fs.writeFileSync(marker, JSON.stringify({ version: v, initialized: true }), 'utf-8');
+        } catch {}
+      }
+    }
+    try {
+      const files = fs.readdirSync(COMMITS_DIR);
+      for (const f of files) {
+        const match = f.match(/^v_(\d+)\.commit$/);
+        if (match) {
+          const v = parseInt(match[1], 10);
+          if (v > currentVersion) {
+            try { fs.unlinkSync(path.join(COMMITS_DIR, f)); } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
   // --- Persistence Layer (Atomic File Sync with Fencing Token, OCC & Transaction Protection) ---
   private readData(): StoreData {
     if (fs.existsSync(STORE_FILE)) {
@@ -189,6 +233,7 @@ class LeadHubSharedStore {
       if (typeof data._version !== 'number') {
         data._version = 1;
       }
+      this.syncCommitsDir(data._version);
       return data;
     }
     return this.getInitialSeed();
@@ -196,15 +241,16 @@ class LeadHubSharedStore {
 
   private writeData(data: StoreData): void {
     const baseVersion = data._version ?? 1;
+    const targetVersion = baseVersion + 1;
 
     // FENCING TOKEN CHECK: Never allow writing if lock was lost or stolen!
     if (this.currentLockOwnerId) {
       this.assertLockOwnership();
     }
 
-    // Increment OCC version for commit
-    data._version = baseVersion + 1;
-    const json = JSON.stringify(data, null, 2);
+    if (!fs.existsSync(COMMITS_DIR)) {
+      try { fs.mkdirSync(COMMITS_DIR, { recursive: true }); } catch {}
+    }
 
     // Unique temp file per process and write call to avoid temp file collision
     const tempFile = path.join(
@@ -212,17 +258,19 @@ class LeadHubSharedStore {
       `mipa_shared_store_${process.pid}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.tmp`
     );
 
+    data._version = targetVersion;
+    const json = JSON.stringify(data, null, 2);
+
     try {
       fs.writeFileSync(tempFile, json, 'utf-8');
 
       // CRITICAL TRANSACTION GUARD (OCC & Double-checked lock):
-      // Verify right before the atomic rename that:
-      // 1. Lock owner is STILL this process (lease has not expired or been stolen)
-      // 2. Disk data version has NOT changed since data was read
+      // 1. Verify lock owner is STILL this process
       if (this.currentLockOwnerId) {
         this.assertLockOwnership();
       }
 
+      // 2. Verify disk data version has NOT changed since data was read
       if (fs.existsSync(STORE_FILE)) {
         try {
           const currentDiskRaw = fs.readFileSync(STORE_FILE, 'utf-8');
@@ -239,7 +287,44 @@ class LeadHubSharedStore {
         }
       }
 
-      // Atomic commit
+      // 3. ATOMIC OCC COMMIT MARKER:
+      // O_CREAT | O_EXCL ('wx') atomically checks and creates the version commit file.
+      // If ANY other process has already committed targetVersion (or if lease expired and another
+      // process committed its changes), openSync with 'wx' FAILS IMMEDIATELY with EEXIST.
+      // This is an atomic kernel-level operation that completely eliminates any race condition
+      // between checking version and renaming data.
+      const commitMarker = path.join(COMMITS_DIR, `v_${targetVersion}.commit`);
+      try {
+        const fd = fs.openSync(commitMarker, 'wx');
+        fs.writeSync(fd, JSON.stringify({
+          version: targetVersion,
+          baseVersion,
+          pid: process.pid,
+          committedAt: Date.now(),
+          ownerId: this.currentLockOwnerId,
+        }));
+        fs.closeSync(fd);
+      } catch (commitErr: any) {
+        if (commitErr.code === 'EEXIST') {
+          throw new Error(
+            `[SharedStore] Giao dịch ghi bị hủy do xung đột phiên bản (OCC Conflict): phiên bản trên đĩa (${targetVersion}) đã được một tiến trình khác cam kết trước. Từ chối ghi đè.`
+          );
+        }
+        throw commitErr;
+      }
+
+      // 4. Final verification: Check lock ownership right after atomic commit claim.
+      // If lease expired or owner changed, rollback the commit marker and throw!
+      if (this.currentLockOwnerId) {
+        try {
+          this.assertLockOwnership();
+        } catch (ownershipErr) {
+          try { fs.unlinkSync(commitMarker); } catch {}
+          throw ownershipErr;
+        }
+      }
+
+      // 5. Atomic commit to primary store file
       fs.renameSync(tempFile, STORE_FILE);
     } catch (err) {
       try {
@@ -268,7 +353,40 @@ class LeadHubSharedStore {
 
   private ensureInitialized(): void {
     if (!fs.existsSync(STORE_FILE)) {
-      this.writeData(this.getInitialSeed());
+      const seed = this.getInitialSeed();
+      seed._version = 1;
+      this.syncCommitsDir(1);
+      const json = JSON.stringify(seed, null, 2);
+      fs.writeFileSync(STORE_FILE, json, 'utf-8');
+    } else {
+      try {
+        const raw = fs.readFileSync(STORE_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        this.syncCommitsDir(data._version || 1);
+      } catch {}
+    }
+  }
+
+  public async executeInPostgresTransaction<T>(
+    callback: (client: any) => Promise<T>
+  ): Promise<T | null> {
+    if (!pgPool) return null;
+    let client: any = null;
+    try {
+      client = await pgPool.connect();
+      await client.query('BEGIN');
+      const result = await callback(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch {}
+      }
+      throw err;
+    } finally {
+      if (client) {
+        client.release();
+      }
     }
   }
 

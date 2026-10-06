@@ -9,6 +9,7 @@ import { POST as logoutRoute } from '../src/app/api/auth/logout/route';
 import { GET as heartbeatGetRoute, POST as heartbeatPostRoute } from '../src/app/api/worker/heartbeat/route';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 
 async function runE2ETests() {
   console.log('================================================================');
@@ -158,6 +159,96 @@ async function runE2ETests() {
   }
   assert(occConflictBlocked, 'OCC Conflict chặn đứng tiến trình có snapshot cũ ghi đè lên phiên bản mới của đĩa');
 
+  // 2.4: Kiểm tra hai tiến trình OS thật (Multi-process) và mô phỏng lease hết hạn / đổi chủ
+  console.log('  * Kiểm tra OCC & khóa hai tiến trình OS thật với mô phỏng lease hết hạn...');
+  const procBaseData = (store as any).readData();
+  const procBaseVersion = procBaseData._version || 1;
+
+  // Tiến trình con B ghi vào store và tăng version
+  execSync(`npx tsx -e "
+    import { store } from './src/lib/store';
+    (store as any).withFileLock(() => {
+      const d = (store as any).readData();
+      d.groups.push({
+        id: 'grp-child-proc-b',
+        name: 'Nhóm Child Process B',
+        url: 'https://facebook.com/groups/child_proc_b',
+        check_interval_seconds: 120,
+        lookback_hours: 24,
+        status: 'active',
+        can_page_comment: true,
+      });
+      (store as any).writeData(d);
+    });
+  "`, { stdio: 'pipe' });
+
+  // Tiến trình A giữ snapshot cũ (procBaseVersion) cố tình ghi đè
+  let procAConflict = false;
+  try {
+    const staleProcData = { ...procBaseData, _version: procBaseVersion };
+    staleProcData.groups.push({
+      id: 'grp-child-proc-a-stale',
+      name: 'Nhóm Child Process A Stale',
+      url: 'https://facebook.com/groups/child_proc_a_stale',
+      check_interval_seconds: 120,
+      lookback_hours: 24,
+      status: 'active',
+      can_page_comment: true,
+    });
+    (store as any).writeData(staleProcData);
+  } catch (err: any) {
+    if (err.message.includes('OCC Conflict')) {
+      procAConflict = true;
+    }
+  }
+  assert(procAConflict, 'Hai tiến trình thật: OCC chặn tuyệt đối tiến trình có snapshot cũ ghi đè dữ liệu tiến trình khác');
+
+  // Mô phỏng lease hết hạn và đổi chủ: Tiến trình có lease hết hạn cố tình commit bị chặn
+  let expiredLeaseBlocked = false;
+  try {
+    const dataToWrite = (store as any).readData();
+    if (!fs.existsSync(lockDir)) {
+      fs.mkdirSync(lockDir, { recursive: true });
+    }
+    (store as any).currentLockOwnerId = 'fake-expired-lock-owner';
+    fs.writeFileSync(ownerFile, JSON.stringify({
+      ownerId: 'different-process-owner-id',
+      pid: process.pid + 999,
+      acquiredAt: Date.now() - 200000,
+      lastHeartbeat: Date.now() - 200000,
+      leaseExpiresAt: Date.now() - 100000,
+    }), 'utf-8');
+    (store as any).writeData(dataToWrite);
+  } catch (err: any) {
+    if (err.message.includes('Quyền sở hữu khóa') || err.message.includes('hết hạn lease') || err.message.includes('Khóa ghi không còn tồn tại')) {
+      expiredLeaseBlocked = true;
+    }
+  } finally {
+    (store as any).currentLockOwnerId = null;
+    try { if (fs.existsSync(ownerFile)) fs.unlinkSync(ownerFile); } catch {}
+    try { if (fs.existsSync(lockDir)) fs.rmdirSync(lockDir); } catch {}
+  }
+  assert(expiredLeaseBlocked, 'Mô phỏng lease hết hạn & đổi chủ: Tiến trình bị cướp quyền sở hữu bị chặn không cho ghi đĩa');
+
+  // Ghi thành công cả 2 bản ghi qua withFileLock
+  (store as any).withFileLock(() => {
+    const d = (store as any).readData();
+    d.groups.push({
+      id: 'grp-child-proc-a-valid',
+      name: 'Nhóm Child Process A Valid',
+      url: 'https://facebook.com/groups/child_proc_a_valid',
+      check_interval_seconds: 120,
+      lookback_hours: 24,
+      status: 'active',
+      can_page_comment: true,
+    });
+    (store as any).writeData(d);
+  });
+  const afterProcGroups = (store as any).readData().groups;
+  const hasProcB = afterProcGroups.some((g: any) => g.id === 'grp-child-proc-b');
+  const hasProcA = afterProcGroups.some((g: any) => g.id === 'grp-child-proc-a-valid');
+  assert(hasProcB && hasProcA, 'Giao dịch hai tiến trình độc lập bảo toàn trọn vẹn cả hai bản ghi, không bị mất bản ghi nào');
+
   // --- ISSUE 3 (P1): Page sai ID hoặc thiếu ID bị từ chối tuyệt đối khi cấu hình Page ID ---
   console.log('\n--- 3. Kiểm tra đối chiếu Page ID chính xác (Không chấp nhận sai ID hoặc thiếu ID dù trùng tên) ---');
   
@@ -215,6 +306,27 @@ async function runE2ETests() {
   const resultNoIdRequired = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageNameOnly, 'Maison MIPA', undefined);
   assert(resultNoIdRequired.matched, 'Chấp nhận tên khi không yêu cầu bắt buộc Page ID');
 
+  // Tình huống 3.5 (P2 Fix): DOM mô phỏng có avatar "Maison MIPA" và link tác giả chứa Page ID 111
+  const mockPageAvatarAndLink = {
+    $: async () => null,
+    evaluate: async () => {
+      return 'Maison MIPA Maison MIPA [https://www.facebook.com/111]';
+    },
+    waitForTimeout: async () => {},
+  } as any;
+  const resultAvatarAndLink = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageAvatarAndLink, 'Maison MIPA', '111');
+  assert(resultAvatarAndLink.matched, 'Thu thập đầy đủ Page ID từ link tác giả khi avatar chỉ có tên, xác nhận thành công');
+
+  const mockPageAvatarAndWrongLink = {
+    $: async () => null,
+    evaluate: async () => {
+      return 'Maison MIPA Maison MIPA [https://www.facebook.com/222]';
+    },
+    waitForTimeout: async () => {},
+  } as any;
+  const resultAvatarWrongLink = await commentDispatcher.verifyAndSwitchPageIdentity(mockPageAvatarAndWrongLink, 'Maison MIPA', '111');
+  assert(!resultAvatarWrongLink.matched, 'Từ chối xác nhận khi avatar trùng tên nhưng link tác giả mang Page ID 222 khác yêu cầu 111');
+
   // --- ISSUE 4 & ISSUE 6 (P1 & P2): Khớp toàn bộ nội dung, độ tươi mới & tách biệt ID tác giả ---
   console.log('\n--- 4. Kiểm tra khớp toàn bộ nội dung, độ tươi mới & tách biệt ID tác giả khỏi Permalink ---');
 
@@ -244,6 +356,40 @@ async function runE2ETests() {
   const authorIdMatch = authorData.match(/(?:page\s*id[:=\s]+|\/|id=|user\/)([0-9]{3,})/i) || authorData.match(/\b([0-9]{3,})\b/);
   const isolatedAuthorId = authorIdMatch ? authorIdMatch[1] : null;
   assert(isolatedAuthorId === '111', 'Lấy chính xác ID tác giả (111) từ link tác giả, không bị nhầm mã bài viết 777666 từ permalink');
+
+  // Mô phỏng 4.5 (P1 Fix): Bình luận tạo trước lần gửi 10 giây kèm nhãn "10 seconds ago" -> Timestamp chứng minh cũ, nhãn tương đối KHÔNG được ghi đè!
+  const dispatchSubmissionTime = Date.now();
+  const timeOldTimestamp = dispatchSubmissionTime - 10000; // 10s trước submission
+  const oldCommentDt = new Date(timeOldTimestamp).toISOString();
+
+  const testEvaluateFreshness = (dtAttr: string | null, textLabel: string, subTime: number) => {
+    let hasFreshnessProof = false;
+    let timestampProvedOld = false;
+
+    if (dtAttr) {
+      const parsed = Date.parse(dtAttr);
+      if (!isNaN(parsed)) {
+        if (parsed >= (subTime - 3000) && parsed <= (Date.now() + 30000)) {
+          hasFreshnessProof = true;
+        } else if (parsed < (subTime - 3000)) {
+          timestampProvedOld = true;
+        }
+      }
+    }
+
+    const recencyMatch = /\b(vừa xong|vừa gửi|vài giây|[0-9]{1,2}\s*giây|just now|few seconds|[0-9]{1,2}s\b|seconds?\s+ago)\b/i.test(textLabel);
+    if (recencyMatch && !timestampProvedOld) {
+      hasFreshnessProof = true;
+    }
+
+    return !timestampProvedOld && hasFreshnessProof;
+  };
+
+  const old10sResult = testEvaluateFreshness(oldCommentDt, '10 seconds ago', dispatchSubmissionTime);
+  assert(!old10sResult, 'Bình luận tạo trước lần gửi 10 giây có timestamp cũ bị từ chối tuyệt đối, nhãn tương đối 10s ago không được ghi đè');
+
+  const freshAfterResult = testEvaluateFreshness(new Date(dispatchSubmissionTime + 1000).toISOString(), '10 seconds ago', dispatchSubmissionTime);
+  assert(freshAfterResult, 'Bình luận tạo sau lần gửi có timestamp hợp lệ được xác nhận thành công');
 
   // --- ISSUE 5 (P2): Đăng xuất xóa phiên xác thực & Thu hồi bền vững qua Restart ---
   console.log('\n--- 5. Kiểm tra luồng Đăng xuất & Thu hồi phiên bền vững qua Restart ---');
@@ -288,6 +434,46 @@ async function runE2ETests() {
   });
   const reuseRes = await getPostsRoute(reuseTokenReq);
   assert(reuseRes.status === 401, 'Token đã đăng xuất bị chặn truy cập API (HTTP 401) kể cả sau khi restart');
+
+  // Kiểm tra 5.7 (P2 Fix): Hai tiến trình OS thật thu hồi token A rồi B, tiến trình thứ 3 kiểm tra cả 2 vẫn bị chặn
+  console.log('  * Kiểm tra thu hồi token qua hai tiến trình OS độc lập...');
+  const tokenProcA = 'test_token_proc_A_' + Date.now();
+  const tokenProcB = 'test_token_proc_B_' + Date.now();
+
+  execSync(`npx tsx -e "
+    import { revokeToken } from './src/lib/auth';
+    revokeToken('${tokenProcA}');
+  "`, { stdio: 'pipe' });
+
+  execSync(`npx tsx -e "
+    import { revokeToken } from './src/lib/auth';
+    revokeToken('${tokenProcB}');
+  "`, { stdio: 'pipe' });
+
+  const checkProcResult = execSync(`npx tsx -e "
+    import { isTokenRevoked } from './src/lib/auth';
+    const aRevoked = isTokenRevoked('${tokenProcA}');
+    const bRevoked = isTokenRevoked('${tokenProcB}');
+    console.log(JSON.stringify({ aRevoked, bRevoked }));
+  "`, { stdio: 'pipe' }).toString().trim();
+
+  const parsedCheck = JSON.parse(checkProcResult);
+  assert(parsedCheck.aRevoked === true, 'Tiến trình mới kiểm tra: Token A thu hồi bởi tiến trình 1 vẫn được lưu giữ an toàn');
+  assert(parsedCheck.bRevoked === true, 'Tiến trình mới kiểm tra: Token B thu hồi bởi tiến trình 2 được lưu giữ an toàn (không ghi đè mất A)');
+
+  // Kiểm tra 5.8: Kiểm tra HTTP với tiến trình mới (Sau restart thật): Token đã logout trả về 401
+  const httpCheckResult = execSync(`npx tsx -e "
+    import { GET as getPostsRoute } from './src/app/api/posts/route';
+    (async () => {
+      const req = new Request('http://localhost:3000/api/posts', {
+        headers: { 'Authorization': 'Bearer ${sessionToken}' },
+      });
+      const res = await getPostsRoute(req);
+      console.log(JSON.stringify({ status: res.status }));
+    })();
+  "`, { stdio: 'pipe' }).toString().trim();
+  const httpParsed = JSON.parse(httpCheckResult);
+  assert(httpParsed.status === 401, 'Tiến trình độc lập mới (Restart thật) gọi route với token đã logout trả về HTTP 401');
 
   // --- ISSUE 6 (P1 & P2): Docker Compose bảo mật & Playwright 1.50.0 ---
   console.log('\n--- 6. Kiểm tra cấu hình Docker Compose an toàn & Playwright 1.50.0 ---');

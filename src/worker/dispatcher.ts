@@ -231,6 +231,7 @@ export class FacebookCommentDispatcher {
 
             // Freshness evidence: Must be created AT or AFTER submissionTime (never before!)
             let hasFreshnessProof = false;
+            let timestampProvedOld = false;
 
             // Check timeTag datetime if available
             const timeTag = el.querySelector('time') as HTMLTimeElement | null;
@@ -238,22 +239,28 @@ export class FacebookCommentDispatcher {
               const dt = timeTag.getAttribute('datetime');
               if (dt) {
                 const parsed = Date.parse(dt);
-                // Must be >= submissionTime - 3000ms (3s grace period for clock drift) and not in the far future
-                if (!isNaN(parsed) && parsed >= (submissionTime - 3000) && parsed <= (Date.now() + 30000)) {
-                  hasFreshnessProof = true;
+                if (!isNaN(parsed)) {
+                  // Must be >= submissionTime - 3000ms (3s grace period for clock drift) and not in the far future
+                  if (parsed >= (submissionTime - 3000) && parsed <= (Date.now() + 30000)) {
+                    hasFreshnessProof = true;
+                  } else if (parsed < (submissionTime - 3000)) {
+                    // Explicit timestamp proves the comment was created BEFORE submission time!
+                    timestampProvedOld = true;
+                  }
                 }
               }
             }
 
             // Instant text recency: "vừa xong", "vừa gửi", "vài giây", "x giây", "just now", "now", "few seconds", "seconds ago"
             // (Note: strictly excludes "phút", "minutes", "1m")
+            // CRITICAL FIX: When timestamp proves the comment is old, relative text label MUST NEVER override that!
             const recencyMatch = /\b(vừa xong|vừa gửi|vài giây|[0-9]{1,2}\s*giây|just now|few seconds|[0-9]{1,2}s\b|seconds?\s+ago)\b/i.test(timeText);
-            if (recencyMatch && !isOldComment) {
+            if (recencyMatch && !isOldComment && !timestampProvedOld) {
               hasFreshnessProof = true;
             }
 
-            // If it is explicitly an old comment or lacks freshness proof, DO NOT confirm!
-            if (isOldComment || !hasFreshnessProof) {
+            // If it is explicitly an old comment, timestamp proved old, or lacks freshness proof, DO NOT confirm!
+            if (isOldComment || timestampProvedOld || !hasFreshnessProof) {
               continue;
             }
 
@@ -329,29 +336,47 @@ export class FacebookCommentDispatcher {
       // Helper function to read the currently active voice from DOM
       const readActiveVoice = async () => {
         return await page.evaluate(() => {
+          const form = document.querySelector('div[role="textbox"]')?.closest('form') || document;
+
           // 1. Check avatar alt near comment input
-          const formImg = document.querySelector('div[role="textbox"]')?.closest('form')?.querySelector('img[alt]');
-          const formAlt = formImg?.getAttribute('alt');
-          if (formAlt) return formAlt.trim();
+          let altText = '';
+          const formImg = form.querySelector('img[alt]');
+          if (formImg) {
+            altText = formImg.getAttribute('alt')?.trim() || '';
+          }
 
           // 2. Check switcher element text/aria-label
-          const switcherEl = document.querySelector(
+          let switcherText = '';
+          const switcherEl = form.querySelector(
+            'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"], div[role="button"][aria-label*="danh nghĩa"]'
+          ) || document.querySelector(
             'div[aria-label*="Tương tác dưới danh nghĩa"], div[aria-label*="Interacting as"], div[aria-label*="Bình luận dưới tên"], div[aria-label*="vai trò"]'
           );
           if (switcherEl) {
-            const label = switcherEl.getAttribute('aria-label') || switcherEl.textContent || '';
-            if (label) return label.trim();
+            switcherText = switcherEl.getAttribute('aria-label') || switcherEl.textContent || '';
           }
 
-          // 3. Check profile anchor near comment input
-          const anchor = document.querySelector('div[role="textbox"]')?.closest('form')?.querySelector('a[href*="facebook.com"]');
-          if (anchor) {
-            const anchorText = anchor.textContent?.trim();
-            const href = anchor.getAttribute('href') || '';
-            return `${anchorText || ''} [${href}]`.trim();
-          }
+          // 3. CRITICAL: Collect all author links, anchors, and data-page-id attributes near comment input
+          // DO NOT return name from avatar alt early and ignore author links that contain the Page ID!
+          const collectedLinks: string[] = [];
+          const anchors = form.querySelectorAll('a[href]');
+          anchors.forEach((a) => {
+            const href = a.getAttribute('href') || '';
+            const text = a.textContent?.trim() || '';
+            const pageIdAttr = a.getAttribute('data-page-id') || a.getAttribute('data-id') || '';
+            if (href || pageIdAttr) {
+              collectedLinks.push(`${text} [${href}] ${pageIdAttr ? `[data-page-id=${pageIdAttr}]` : ''}`.trim());
+            }
+          });
 
-          return null;
+          const elementsWithPageId = form.querySelectorAll('[data-page-id], [data-pageid]');
+          elementsWithPageId.forEach((el) => {
+            const pid = el.getAttribute('data-page-id') || el.getAttribute('data-pageid');
+            if (pid) collectedLinks.push(`[data-page-id=${pid}]`);
+          });
+
+          const parts = [altText, switcherText, ...collectedLinks].filter(Boolean);
+          return parts.length > 0 ? parts.join(' ') : null;
         });
       };
 
@@ -362,13 +387,16 @@ export class FacebookCommentDispatcher {
 
         // 1. If targetPageId is specified, check ID strictly!
         if (targetPageId) {
-          // Check if voice contains ANY numeric ID (e.g. Page ID: 222, or /222, or [222])
-          const anyIdMatch = voice.match(/(?:page\s*id[:=\s]+|\/|data-page-id="|id=)([0-9]{3,})/i) ||
-                             voice.match(/\b([0-9]{3,})\b/);
-          if (anyIdMatch && anyIdMatch[1] !== targetPageId) {
-            // Conflicting Page ID detected!
-            return false;
+          // Check if voice contains explicit conflicting Page ID (e.g. Page ID: 222 when target is 111)
+          const explicitIdMatches = Array.from(voice.matchAll(/(?:page\s*id[:=\s]+|data-page-id=["']?|facebook\.com\/)([0-9]{3,})/gi));
+          if (explicitIdMatches.length > 0) {
+            const hasTargetId = explicitIdMatches.some(m => m[1] === targetPageId);
+            const hasConflict = explicitIdMatches.some(m => m[1] !== targetPageId);
+            if (!hasTargetId && hasConflict) {
+              return false;
+            }
           }
+
           // STRICT REQUIREMENT: When targetPageId is configured, must have explicit proof of matching ID!
           // NEVER fall back to name-only when Page ID cannot be read or is missing.
           return voice.includes(targetPageId);

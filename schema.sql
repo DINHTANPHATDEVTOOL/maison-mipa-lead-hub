@@ -178,3 +178,19 @@ CREATE POLICY "Allow authenticated staff to read and update leads"
     ON crm_leads FOR ALL 
     TO authenticated 
     USING (true);
+
+-- 11. Revoked Auth Tokens Table (Danh sách token thu hồi bằng giao dịch nguyên tử)
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    token_hash VARCHAR(64) PRIMARY KEY,
+    token_text TEXT,
+    revoked_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 12. Store State & Versioning (Quản lý phiên bản dữ liệu giao dịch OCC)
+CREATE TABLE IF NOT EXISTS store_state (
+    key VARCHAR(50) PRIMARY KEY,
+    version INT NOT NULL DEFAULT 1,
+    data JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
