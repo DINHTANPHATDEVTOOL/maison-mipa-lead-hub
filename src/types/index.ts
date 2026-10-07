@@ -83,6 +83,8 @@ export interface FacebookPost {
   content_raw: string;
   posted_at: string;
   detected_at: string;
+  image_urls?: string[];
+  media_preview_url?: string;
   classification?: LeadClassification;
   interaction?: OutreachInteraction;
 }

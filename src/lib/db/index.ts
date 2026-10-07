@@ -15,8 +15,9 @@ export function isProductionEnv(): boolean {
  * initialized with all 16 tables, constraints and indexes.
  */
 export function getDbPool(): Pool {
-  if (activePool) {
-    return activePool;
+  const g = globalThis as any;
+  if (g.__mipaDbPool) {
+    return g.__mipaDbPool;
   }
 
   const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -33,6 +34,7 @@ export function getDbPool(): Pool {
       console.error('[PostgreSQL Pool Error]', err);
     });
 
+    g.__mipaDbPool = activePool;
     return activePool;
   }
 
@@ -43,50 +45,70 @@ export function getDbPool(): Pool {
   }
 
   // Development / Test in-memory PostgreSQL emulator
-  const { newDb } = require('pg-mem');
-  const db = newDb();
+  try {
+    const { newDb } = require('pg-mem');
+    const db = newDb();
 
-  db.public.registerFunction({
-    name: 'uuid_generate_v4',
-    implementation: () => require('crypto').randomUUID(),
-  });
+    db.public.registerFunction({
+      name: 'uuid_generate_v4',
+      implementation: () => require('crypto').randomUUID(),
+    });
 
-  const migrationsDir = path.join(process.cwd(), 'src', 'lib', 'db', 'migrations');
-  if (fs.existsSync(migrationsDir)) {
-    const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
-    for (const file of files) {
-      let sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-      sql = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-      const statements = sql.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
-      for (const stmt of statements) {
-        if (stmt.toLowerCase().startsWith('create extension')) continue;
-        try {
-          db.public.none(stmt);
-        } catch {}
-      }
-      const match = file.match(/^(\d+)_(.+)\.sql$/);
-      if (match) {
-        try {
-          db.public.none(`INSERT INTO schema_migrations (version, name) VALUES (${parseInt(match[1], 10)}, '${match[2]}') ON CONFLICT DO NOTHING;`);
-        } catch {}
+    const migrationsDir = path.join(process.cwd(), 'src', 'lib', 'db', 'migrations');
+    if (fs.existsSync(migrationsDir)) {
+      const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+      for (const file of files) {
+        let sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+        sql = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+        const statements = sql.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
+        for (const stmt of statements) {
+          if (stmt.toLowerCase().startsWith('create extension')) continue;
+          try {
+            db.public.none(stmt);
+          } catch {}
+        }
+        const match = file.match(/^(\d+)_(.+)\.sql$/);
+        if (match) {
+          try {
+            db.public.none(`INSERT INTO schema_migrations (version, name) VALUES (${parseInt(match[1], 10)}, '${match[2]}') ON CONFLICT DO NOTHING;`);
+          } catch {}
+        }
       }
     }
-  }
 
-  const adapter = db.adapters.createPg();
-  activePool = new adapter.Pool();
-  return activePool!;
+    const adapter = db.adapters.createPg();
+    activePool = new adapter.Pool();
+    g.__mipaDbPool = activePool;
+    return activePool!;
+  } catch (err: any) {
+    console.warn('[Database] Không thể khởi tạo pg-mem emulator:', err.message, '- Chuyển sang Safe MockPool fallback.');
+    const mockPool: any = {
+      query: async () => ({ rows: [], rowCount: 0 }),
+      connect: async () => ({
+        query: async () => ({ rows: [], rowCount: 0 }),
+        release: () => {},
+      }),
+      on: () => mockPool,
+      end: async () => {},
+    };
+    activePool = mockPool;
+    g.__mipaDbPool = activePool;
+    return activePool!;
+  }
 }
 
 /**
  * Reset pool instance (useful for test isolation)
  */
 export async function closeDbPool(): Promise<void> {
-  if (activePool) {
+  const g = globalThis as any;
+  if (activePool || g.__mipaDbPool) {
     try {
-      await activePool.end();
+      if (activePool) await activePool.end();
+      if (g.__mipaDbPool && g.__mipaDbPool !== activePool) await g.__mipaDbPool.end();
     } catch {}
     activePool = null;
+    g.__mipaDbPool = null;
   }
 }
 

@@ -135,6 +135,8 @@ export class GroupCrawlService {
           author_name: rawPost.author_name,
           content_raw: rawPost.content_raw,
           posted_at: rawPost.posted_at,
+          image_urls: rawPost.image_urls,
+          media_preview_url: rawPost.media_preview_url,
         });
         createdPost = res.post;
         isNew = res.isNew;
@@ -148,26 +150,42 @@ export class GroupCrawlService {
           author_name: rawPost.author_name,
           content_raw: rawPost.content_raw,
           posted_at: rawPost.posted_at,
+          image_urls: rawPost.image_urls,
+          media_preview_url: rawPost.media_preview_url,
         });
         createdPost = res.post;
         isNew = res.isNew;
       }
 
       if (createdPost) {
+        try {
+          store.addPostIfNew({
+            id: createdPost.id,
+            group_id: createdPost.group_id || group.id,
+            group_name: createdPost.group_name || group.name,
+            facebook_post_id: createdPost.facebook_post_id,
+            post_url: createdPost.post_url,
+            author_name: createdPost.author_name,
+            content_raw: createdPost.content_raw,
+            posted_at: createdPost.posted_at,
+            image_urls: createdPost.image_urls || rawPost.image_urls,
+            media_preview_url: createdPost.media_preview_url || rawPost.media_preview_url,
+          });
+        } catch {}
+
         if (isNew) newPostsCount++;
         savedPosts.push(createdPost);
 
-        // 5. Nếu kích hoạt autoDispatch và bài có nhu cầu cao (>= 90%)
+        // 5. Tự động gửi bình luận ngay khi phát hiện bài có nhu cầu (không cần đợi duyệt)
         if (autoDispatch && isNew && createdPost.classification) {
           const cls = createdPost.classification;
           if (
             cls.intent === 'looking_for_service' &&
-            Number(cls.confidence_score) >= 90 &&
             cls.suggested_comment_text
           ) {
-            console.log(`[GroupCrawlService Auto-Dispatch] Tự động gửi bình luận cho bài: ${createdPost.post_url}`);
+            console.log(`[GroupCrawlService Auto-Dispatch] Tự động gửi bình luận ngay cho bài: ${createdPost.post_url}`);
             try {
-              await outreachDispatchService.dispatchOutreach({
+              const res = await outreachDispatchService.dispatchOutreach({
                 postId: createdPost.id,
                 commentContent: cls.suggested_comment_text,
                 operatorName: 'Tự Động Quét Nhóm',
@@ -176,6 +194,9 @@ export class GroupCrawlService {
                 templateId: cls.suggested_template_id || undefined,
                 profileId,
               });
+              if (res.success) {
+                console.log(`[GroupCrawlService Auto-Dispatch] Gửi thành công cho bài ${createdPost.id}!`);
+              }
             } catch (dispatchErr: any) {
               console.error('[GroupCrawlService Auto-Dispatch Error]', dispatchErr.message);
             }

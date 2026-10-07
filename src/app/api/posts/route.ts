@@ -20,17 +20,46 @@ export async function GET(req: Request) {
   const groupId = searchParams.get('group_id') || undefined;
 
   try {
-    const posts = await postRepo.getAll({ intent, reviewStatus, groupId });
+    let posts = await postRepo.getAll({ intent, reviewStatus, groupId }).catch(() => []);
+    if (posts.length === 0) {
+      let storePosts = store.getPosts();
+      if (groupId) storePosts = storePosts.filter(p => p.group_id === groupId);
+      if (intent) storePosts = storePosts.filter(p => p.classification?.intent === intent);
+      if (reviewStatus) storePosts = storePosts.filter(p => p.classification?.review_status === reviewStatus);
+      if (storePosts.length > 0) {
+        posts = storePosts;
+      }
+    }
+    // Seamlessly enrich with persistent store media if missing
+    const allStorePosts = store.getPosts();
+    posts.forEach(p => {
+      const sp = allStorePosts.find(s => s.id === p.id || s.post_url === p.post_url || (p.facebook_post_id && s.facebook_post_id === p.facebook_post_id));
+      if (sp) {
+        if (!p.image_urls || p.image_urls.length === 0) p.image_urls = sp.image_urls;
+        if (!p.media_preview_url) p.media_preview_url = sp.media_preview_url;
+      }
+    });
+
+    posts.sort((a, b) => {
+      const timeA = new Date(a.posted_at || a.detected_at || 0).getTime();
+      const timeB = new Date(b.posted_at || b.detected_at || 0).getTime();
+      return timeB - timeA;
+    });
+
     return NextResponse.json({ success: true, count: posts.length, data: posts });
   } catch (err: any) {
-    if (process.env.NODE_ENV !== 'production') {
-      let posts = store.getPosts();
-      if (groupId) posts = posts.filter(p => p.group_id === groupId);
-      if (intent) posts = posts.filter(p => p.classification?.intent === intent);
-      if (reviewStatus) posts = posts.filter(p => p.classification?.review_status === reviewStatus);
-      return NextResponse.json({ success: true, count: posts.length, data: posts });
-    }
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    let posts = store.getPosts();
+    if (groupId) posts = posts.filter(p => p.group_id === groupId);
+    if (intent) posts = posts.filter(p => p.classification?.intent === intent);
+    if (reviewStatus) posts = posts.filter(p => p.classification?.review_status === reviewStatus);
+    
+    posts.sort((a, b) => {
+      const timeA = new Date(a.posted_at || a.detected_at || 0).getTime();
+      const timeB = new Date(b.posted_at || b.detected_at || 0).getTime();
+      return timeB - timeA;
+    });
+
+    return NextResponse.json({ success: true, count: posts.length, data: posts });
   }
 }
 

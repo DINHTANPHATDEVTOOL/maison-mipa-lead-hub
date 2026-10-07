@@ -396,38 +396,58 @@ class LeadHubSharedStore {
       services: [
         {
           id: 'srv-01',
-          code: 'AO_DAI',
-          name: 'Chụp Ảnh Áo Dài Nghệ Thuật & Truyền Thống',
-          base_price: 1200000,
-          price_note: 'Gói 1-2 người, kèm phụ kiện, chỉnh sửa 15 ảnh chuyên sâu',
-          service_area: 'TP. Hồ Chí Minh (Q.1, Q.3, Bình Thạnh, Thủ Đức)',
+          code: 'CA_NHAN',
+          name: 'Chụp Cá Nhân / Tốt Nghiệp / Nàng Thơ',
+          base_price: 990000,
+          price_note: 'Gói cá nhân 1 người, tặng kèm makeup nhẹ, chỉnh sửa 15 ảnh chuyên sâu',
+          service_area: 'TP. Hồ Chí Minh & Studio Maison MIPA',
           includes_posing_support: true,
           is_active: true,
         },
         {
           id: 'srv-02',
-          code: 'NANG_THO',
-          name: 'Concept Nàng Thơ & Vintage Studio',
+          code: 'COUPLE',
+          name: 'Chụp Couple / Cặp Đôi / Người Yêu',
           base_price: 1500000,
-          price_note: 'Gói cá nhân, bao gồm makeup nhẹ và layout hoa tươi',
-          service_area: 'Studio Maison MIPA (Quận 1, TP.HCM)',
+          price_note: 'Gói 2 người, tặng kèm makeup nữ, hỗ trợ tạo dáng lãng mạn, chỉnh sửa 20 ảnh',
+          service_area: 'TP. Hồ Chí Minh & Ngoại cảnh/Studio',
           includes_posing_support: true,
           is_active: true,
         },
         {
           id: 'srv-03',
-          code: 'KY_YEU',
-          name: 'Kỷ Yếu Nhóm & Tốt Nghiệp',
-          base_price: 2500000,
-          price_note: 'Gói nhóm từ 5-10 bạn, chụp ngoại cảnh + lớp học',
-          service_area: 'TP. Hồ Chí Minh & Bình Dương',
+          code: 'AO_DAI',
+          name: 'Chụp Ảnh Áo Dài Nghệ Thuật & Truyền Thống',
+          base_price: 1200000,
+          price_note: 'Gói 1-2 người, kèm phụ kiện nón lá/quạt/hoa sen, chỉnh sửa 15 ảnh',
+          service_area: 'TP. Hồ Chí Minh (Q.1, Q.3, Bình Thạnh, Thủ Đức)',
           includes_posing_support: true,
           is_active: true,
         },
         {
           id: 'srv-04',
+          code: 'KY_YEU_NHOM',
+          name: 'Kỷ Yếu Nhóm & Tập Thể Lớp',
+          base_price: 2500000,
+          price_note: 'Gói nhóm từ 5-10 bạn trở lên, chụp ngoại cảnh + trường học',
+          service_area: 'TP. Hồ Chí Minh & Bình Dương',
+          includes_posing_support: true,
+          is_active: true,
+        },
+        {
+          id: 'srv-05',
+          code: 'CUOI_HOI',
+          name: 'Chụp Cưới / Phóng Sự Cưới / Pre-Wedding',
+          base_price: 3500000,
+          price_note: 'Trọn gói cô dâu chú rể, chụp ngày lễ/tiệc hoặc ngoại cảnh',
+          service_area: 'TP. Hồ Chí Minh',
+          includes_posing_support: true,
+          is_active: true,
+        },
+        {
+          id: 'srv-06',
           code: 'GIA_DINH',
-          name: 'Ảnh Gia Đình & Em Bé Đầy Tháng',
+          name: 'Ảnh Gia Đình & Em Bé',
           base_price: 2200000,
           price_note: 'Gói gia đình 3-5 thành viên, phòng chụp máy lạnh riêng biệt',
           service_area: 'Studio Maison MIPA (Quận 1, TP.HCM)',
@@ -439,34 +459,67 @@ class LeadHubSharedStore {
         {
           id: 'tpl-01',
           service_id: 'srv-01',
-          title: 'Mẫu Tiếp Cận Áo Dài (Nhẹ Nhàng, Nêu Giá & Tạo Dáng)',
-          template_content: 'Chào bạn nha, Maison MIPA chuyên các bộ ảnh Áo dài tại {khu_vuc} ({gia}). Bên mình có stylist hướng dẫn tạo dáng chi tiết từng góc chụp cho bạn hoàn toàn yên tâm nhé! Bạn nhắn Page để tiệm gửi album ảnh mẫu tham khảo nha.',
-          allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}'],
+          title: 'Mẫu Cá Nhân & Tốt Nghiệp (Nêu Giá & Stylist Chỉ Dáng)',
+          template_content: 'Chào {ten_khach} nha! Maison MIPA có gói chụp cá nhân / tốt nghiệp tại {khu_vuc} giá chỉ từ {gia} ({ho_tro_tao_dang}). Bên mình có sẵn đồ cử nhân và stylist chỉ dáng từng góc cực tự nhiên. Bạn nhắn Page để tiệm gửi album ảnh mẫu tham khảo nhé!',
+          allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'],
           is_approved: true,
           version: 1,
-          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_by_name: 'Admin Maison MIPA',
           updated_at: new Date().toISOString(),
         },
         {
           id: 'tpl-02',
           service_id: 'srv-02',
-          title: 'Mẫu Concept Nàng Thơ Studio (Tone Hàn/Vintage)',
-          template_content: 'Dạ chào bạn, concept nàng thơ tại Maison MIPA ({khu_vuc}) đang có gói trọn gói {gia} đã gồm makeup nhẹ nhàng và hoa tươi theo tone. Bạn ghé Page xem một số bộ ảnh tiệm vừa thực hiện nhé!',
-          allowed_placeholders: ['{gia}', '{khu_vuc}'],
+          title: 'Mẫu Couple / Cặp Đôi (Tình Cảm, Lãng Mạn)',
+          template_content: 'Dạ chào 2 bạn nha! Gói chụp Couple / Cặp đôi bên Maison MIPA tại {khu_vuc} trọn gói chỉ {gia} ạ ({ho_tro_tao_dang}). Nhiếp ảnh bên mình bắt trọn từng khoảnh khắc tình cảm tự nhiên của 2 bạn. Ghé Page xem album couple vừa chụp nhé!',
+          allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}'],
           is_approved: true,
           version: 1,
-          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_by_name: 'Admin Maison MIPA',
           updated_at: new Date().toISOString(),
         },
         {
           id: 'tpl-03',
           service_id: 'srv-03',
-          title: 'Mẫu Kỷ Yếu & Tốt Nghiệp Nhóm',
+          title: 'Mẫu Áo Dài Nghệ Thuật (Nhẹ Nhàng & Tạo Dáng)',
+          template_content: 'Chào bạn nha, Maison MIPA chuyên các bộ ảnh Áo dài tại {khu_vuc} ({gia}). Bên mình có stylist hướng dẫn tạo dáng chi tiết từng góc chụp cho bạn hoàn toàn yên tâm nhé! Bạn nhắn Page để tiệm gửi album ảnh mẫu tham khảo nha.',
+          allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}'],
+          is_approved: true,
+          version: 1,
+          updated_by_name: 'Admin Maison MIPA',
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: 'tpl-04',
+          service_id: 'srv-04',
+          title: 'Mẫu Kỷ Yếu Nhóm & Tập Thể Lớp',
           template_content: 'Chào các bạn, Maison MIPA có gói chụp kỷ yếu nhóm tại {khu_vuc} giá chỉ từ {gia}. Studio hỗ trợ lên concept và hướng dẫn tạo dáng cho cả nhóm cực tự nhiên. Bạn nhắn Page để team tư vấn lịch chụp nhé!',
+          allowed_placeholders: ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}'],
+          is_approved: true,
+          version: 1,
+          updated_by_name: 'Admin Maison MIPA',
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: 'tpl-05',
+          service_id: 'srv-05',
+          title: 'Mẫu Cưới Hỏi & Pre-Wedding',
+          template_content: 'Maison MIPA chúc mừng ngày vui của 2 bạn nhé! Gói chụp cưới / phóng sự cưới tại {khu_vuc} trọn gói chỉ từ {gia}. Ekip luôn đồng hành ghi lại khoảnh khắc hạnh phúc nhất. Nhắn tin Page để nhận trọn bộ ưu đãi cưới nha!',
           allowed_placeholders: ['{gia}', '{khu_vuc}'],
           is_approved: true,
           version: 1,
-          updated_by_name: 'Trần Minh Thư (Marketing Lead)',
+          updated_by_name: 'Admin Maison MIPA',
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: 'tpl-06',
+          service_id: 'srv-06',
+          title: 'Mẫu Gia Đình & Em Bé',
+          template_content: 'Chào gia đình mình nha, Maison MIPA có gói ảnh gia đình ấm cúng tại {khu_vuc} giá từ {gia}. Phòng chụp riêng biệt máy lạnh, thợ nhiệt tình kiên nhẫn với các bé. Nhắn Page tiệm tư vấn nha!',
+          allowed_placeholders: ['{gia}', '{khu_vuc}'],
+          is_approved: true,
+          version: 1,
+          updated_by_name: 'Admin Maison MIPA',
           updated_at: new Date().toISOString(),
         }
       ],
@@ -581,7 +634,11 @@ class LeadHubSharedStore {
 
   // --- Posts & Anti-Duplication API ---
   public getPosts(): FacebookPost[] {
-    return this.readData().posts;
+    return this.readData().posts.slice().sort((a, b) => {
+      const timeA = new Date(a.posted_at || a.detected_at || 0).getTime();
+      const timeB = new Date(b.posted_at || b.detected_at || 0).getTime();
+      return timeB - timeA;
+    });
   }
 
   public getPostById(id: string): FacebookPost | null {
@@ -589,6 +646,7 @@ class LeadHubSharedStore {
   }
 
   public addPostIfNew(postData: {
+    id?: string;
     group_id: string;
     group_name: string;
     facebook_post_id?: string;
@@ -596,6 +654,8 @@ class LeadHubSharedStore {
     author_name: string;
     content_raw: string;
     posted_at?: string;
+    image_urls?: string[];
+    media_preview_url?: string;
   }): { post: FacebookPost; isNew: boolean } {
     return this.withFileLock(() => {
       const storeData = this.readData();
@@ -630,6 +690,7 @@ class LeadHubSharedStore {
       });
 
       if (existing) {
+        let changed = false;
         // If content changed, update and re-run classification
         if (existing.content_raw !== postData.content_raw) {
           existing.content_raw = postData.content_raw;
@@ -651,13 +712,23 @@ class LeadHubSharedStore {
             suggested_comment_text: reclass.suggested_comment_text,
             review_status: reclass.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
           };
+          changed = true;
+        }
+
+        if (postData.image_urls && postData.image_urls.length > 0 && (!existing.image_urls || existing.image_urls.length === 0)) {
+          existing.image_urls = postData.image_urls;
+          existing.media_preview_url = postData.image_urls[0];
+          changed = true;
+        }
+
+        if (changed) {
           this.writeData(storeData);
         }
         return { post: existing, isNew: false };
       }
 
       const newPost: FacebookPost = {
-        id: `post-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        id: (postData as any).id || `post-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         group_id: postData.group_id,
         group_name: postData.group_name,
         facebook_post_id: finalPostId,
@@ -667,6 +738,33 @@ class LeadHubSharedStore {
         content_raw: postData.content_raw,
         posted_at: postData.posted_at || new Date().toISOString(),
         detected_at: new Date().toISOString(),
+        image_urls: postData.image_urls || (postData.media_preview_url ? [postData.media_preview_url] : []),
+        media_preview_url: postData.media_preview_url || postData.image_urls?.[0],
+      };
+
+      const classificationResult = classifyPostContent(
+        newPost.content_raw,
+        storeData.services,
+        storeData.templates,
+        newPost.posted_at,
+        newPost.author_name
+      );
+      newPost.classification = {
+        id: `cls-${Date.now()}`,
+        post_id: newPost.id,
+        intent: classificationResult.intent,
+        service_detected: classificationResult.service_detected,
+        location: classificationResult.location,
+        pax: classificationResult.pax,
+        shooting_date_text: classificationResult.shooting_date_text,
+        shooting_date_suggested: classificationResult.shooting_date_suggested,
+        budget_raw: classificationResult.budget_raw,
+        extra_requirements: classificationResult.extra_requirements,
+        confidence_score: classificationResult.confidence_score,
+        classification_reason: classificationResult.classification_reason,
+        suggested_template_id: classificationResult.suggested_template_id,
+        suggested_comment_text: classificationResult.suggested_comment_text,
+        review_status: classificationResult.intent === 'looking_for_service' ? 'pending_review' : 'dismissed',
       };
 
       const grp = storeData.groups.find(g => g.id === postData.group_id);
@@ -686,6 +784,19 @@ class LeadHubSharedStore {
       post.classification = classification;
       this.writeData(storeData);
       return true;
+    });
+  }
+
+  public deletePost(id: string): boolean {
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const initialLen = storeData.posts.length;
+      storeData.posts = storeData.posts.filter(p => p.id !== id);
+      if (storeData.posts.length !== initialLen) {
+        this.writeData(storeData);
+        return true;
+      }
+      return false;
     });
   }
 
@@ -979,6 +1090,46 @@ class LeadHubSharedStore {
       };
       this.writeData(storeData);
       return storeData.templates[idx];
+    });
+  }
+
+  public addTemplate(data: {
+    service_id: string;
+    title: string;
+    template_content: string;
+    allowed_placeholders?: string[];
+    is_approved?: boolean;
+    updated_by_name?: string;
+  }): OutreachTemplate {
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const newTemplate: OutreachTemplate = {
+        id: 'tpl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7),
+        service_id: data.service_id,
+        title: data.title.trim(),
+        template_content: data.template_content.trim(),
+        allowed_placeholders: data.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'],
+        is_approved: data.is_approved ?? true,
+        version: 1,
+        updated_by_name: data.updated_by_name || 'Admin Maison MIPA',
+        updated_at: new Date().toISOString(),
+      };
+      storeData.templates.push(newTemplate);
+      this.writeData(storeData);
+      return newTemplate;
+    });
+  }
+
+  public deleteTemplate(id: string): boolean {
+    return this.withFileLock(() => {
+      const storeData = this.readData();
+      const initialLen = storeData.templates.length;
+      storeData.templates = storeData.templates.filter(t => t.id !== id);
+      if (storeData.templates.length !== initialLen) {
+        this.writeData(storeData);
+        return true;
+      }
+      return false;
     });
   }
 

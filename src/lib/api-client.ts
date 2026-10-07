@@ -17,8 +17,28 @@ export async function apiFetch(url: string, init?: RequestInit): Promise<Respons
     headers.set('x-user-role', 'admin');
   }
 
-  return fetch(url, {
+  const response = await fetch(url, {
     ...init,
     headers,
   });
+
+  // Safe json parser wrapper to prevent "Unexpected token '<', <!DOCTYPE..." crashes
+  response.json = async () => {
+    try {
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        const cleanMsg = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+        return {
+          success: false,
+          error: `Lỗi máy chủ (HTTP ${response.status}): ${cleanMsg || 'Không nhận được phản hồi JSON hợp lệ'}`,
+        };
+      }
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  };
+
+  return response;
 }

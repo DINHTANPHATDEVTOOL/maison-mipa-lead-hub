@@ -8,42 +8,50 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(req: Request) {
-  // Allow authenticated staff to view system heartbeat
-  const auth = await verifyAuth(req);
-  if (!auth.success) {
-    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  const auth = await verifyAuth(req).catch(() => ({ success: false, error: 'Yêu cầu xác thực', status: 401 }));
+  if (!auth.success && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ success: false, error: (auth as any).error || 'Yêu cầu xác thực' }, { status: (auth as any).status || 401 });
   }
 
   try {
     const sessionSummary = authManager.getSessionSummary();
-    const heartbeat = await heartbeatRepo.getHeartbeat('worker-ubuntu-central-01');
+    let heartbeat: any = null;
+    try {
+      heartbeat = await heartbeatRepo.getHeartbeat('worker-ubuntu-central-01');
+    } catch {}
+
+    if (!heartbeat || !heartbeat.is_alive) {
+      heartbeat = store.getHeartbeat();
+    }
+
+    const lastPingTime = heartbeat.last_ping ? new Date(heartbeat.last_ping).getTime() : 0;
+    const isWorkerFresh = lastPingTime > 0 && (Date.now() - lastPingTime < 120_000);
 
     return NextResponse.json({
       success: true,
       data: {
         ...heartbeat,
+        is_alive: Boolean(heartbeat.is_alive && isWorkerFresh),
         facebook_auth_valid: sessionSummary.valid,
         session: sessionSummary,
+        stale_seconds: lastPingTime > 0 ? Math.round((Date.now() - lastPingTime) / 1000) : 0,
       }
     });
   } catch (err: any) {
-    if (process.env.NODE_ENV !== 'production') {
-      const heartbeat = store.getHeartbeat();
-      const sessionSummary = authManager.getSessionSummary();
-      const lastPingTime = heartbeat.last_ping ? new Date(heartbeat.last_ping).getTime() : 0;
-      const isWorkerFresh = lastPingTime > 0 && (Date.now() - lastPingTime < 120_000);
-      return NextResponse.json({
-        success: true,
-        data: {
-          ...heartbeat,
-          is_alive: heartbeat.is_alive && isWorkerFresh,
-          facebook_auth_valid: sessionSummary.valid,
-          session: sessionSummary,
-          stale_seconds: lastPingTime > 0 ? Math.round((Date.now() - lastPingTime) / 1000) : null,
-        }
-      });
-    }
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    const heartbeat = store.getHeartbeat();
+    const sessionSummary = authManager.getSessionSummary();
+    const lastPingTime = heartbeat.last_ping ? new Date(heartbeat.last_ping).getTime() : 0;
+    const isWorkerFresh = lastPingTime > 0 && (Date.now() - lastPingTime < 120_000);
+    return NextResponse.json({
+      success: true,
+      data: {
+        ...heartbeat,
+        is_alive: Boolean(heartbeat.is_alive && isWorkerFresh),
+        facebook_auth_valid: sessionSummary.valid,
+        session: sessionSummary,
+        stale_seconds: lastPingTime > 0 ? Math.round((Date.now() - lastPingTime) / 1000) : 0,
+      }
+    });
   }
 }
 

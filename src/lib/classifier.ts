@@ -94,12 +94,14 @@ const CUSTOMER_LOOKING_KEYWORDS = [
   'muốn làm bộ ảnh', 'cần thợ ngày', 'chụp ngoại cảnh', 'cần thợ có tâm',
   'tìm bạn chụp', 'muốn book lịch', 'cần người chụp', 'thuê thợ chụp',
   'tìm người chụp', 'muốn chụp một bộ', 'cần kiếm thợ', 'tìm ekip chụp',
+  'chụp concept', 'tìm thợ chụp concept', 'chụp bộ ảnh', 'chụp hình', 'tìm thợ',
   // Unaccented equivalents
   'can tim tho', 'tim tho chup', 'can chup', 'muon chup', 'kiem tho anh',
   'tim studio', 'can studio', 'tim photographer', 'ai nhan chup', 'can book tho',
   'muon lam bo anh', 'can tho ngay', 'chup ngoai canh', 'can tho co tam',
   'tim ban chup', 'muon book lich', 'can nguoi chup', 'thue tho chup',
-  'tim nguoi chup', 'muon chup mot bo', 'can kiem tho', 'tim ekip chup'
+  'tim nguoi chup', 'muon chup mot bo', 'can kiem tho', 'tim ekip chup',
+  'chup concept', 'tim tho chup concept', 'chup bo anh', 'chup hinh', 'tim tho'
 ];
 
 // Allowed template placeholders
@@ -192,7 +194,8 @@ export function classifyPostContent(
   rawContent: string,
   services: ServiceItem[] = [],
   templates: OutreachTemplate[] = [],
-  postedAt?: string
+  postedAt?: string,
+  customerName?: string
 ): ClassificationResult {
   const sanitizedText = sanitizePostContent(rawContent);
   const lower = sanitizedText.toLowerCase();
@@ -303,31 +306,88 @@ export function classifyPostContent(
   const activeServices = services.filter(s => s.is_active);
   let detectedService: ServiceItem | null = null;
 
-  if (
-    lower.includes('áo dài') || unaccented.includes('ao dai') || 
-    lower.includes('cổ phục') || unaccented.includes('co phuc')
-  ) {
-    detectedService = activeServices.find(s => s.code === 'AO_DAI') || null;
-  } else if (
-    lower.includes('nàng thơ') || unaccented.includes('nang tho') || 
-    lower.includes('vintage') || lower.includes('concept') || 
-    lower.includes('indoor') || lower.includes('sinh nhật') || unaccented.includes('sinh nhat')
-  ) {
-    detectedService = activeServices.find(s => s.code === 'NANG_THO') || null;
-  } else if (
-    lower.includes('đôi') || unaccented.includes('doi') ||
-    lower.includes('couple') || lower.includes('cưới') || unaccented.includes('cuoi') ||
-    lower.includes('pre-wedding') || lower.includes('bạn gái') || unaccented.includes('ban gai') ||
-    lower.includes('người yêu') || unaccented.includes('nguoi yeu')
-  ) {
-    detectedService = activeServices.find(s => s.code === 'PRE_WEDDING') || null;
-  } else if (
-    lower.includes('kỷ yếu') || unaccented.includes('ky yeu') ||
-    lower.includes('nhóm bạn') || unaccented.includes('nhom ban') ||
-    lower.includes('tốt nghiệp') || unaccented.includes('tot nghiep') ||
-    lower.includes('lớp') || unaccented.includes('lop')
-  ) {
-    detectedService = activeServices.find(s => s.code === 'KY_YEU') || null;
+  const findServiceByCode = (codes: string[]) => {
+    return activeServices.find(s => codes.includes(s.code)) || null;
+  };
+
+  const isGraduation = lower.includes('tốt nghiệp') || unaccented.includes('tot nghiep') ||
+                       lower.includes('cử nhân') || unaccented.includes('cu nhan');
+  const isGroup = lower.includes('kỷ yếu') || unaccented.includes('ky yeu') ||
+                  lower.includes('nhóm') || unaccented.includes('nhom') ||
+                  lower.includes('tập thể') || unaccented.includes('tap the') ||
+                  lower.includes('lớp') || unaccented.includes('lop') ||
+                  lower.includes('cả phòng') || unaccented.includes('ca phong');
+  const isWedding = lower.includes('phóng sự cưới') || unaccented.includes('phong su cuoi') ||
+                    lower.includes('tiệc cưới') || unaccented.includes('tiec cuoi') ||
+                    lower.includes('đám cưới') || unaccented.includes('dam cuoi') ||
+                    lower.includes('lễ cưới') || unaccented.includes('le cuoi') ||
+                    lower.includes('đám hỏi') || unaccented.includes('dam hoi') ||
+                    lower.includes('lễ ăn hỏi') || unaccented.includes('le an hoi') ||
+                    lower.includes('rước dâu') || unaccented.includes('ruoc dau') ||
+                    lower.includes('pre-wedding') || lower.includes('pre wedding') ||
+                    lower.includes('ảnh cưới') || unaccented.includes('anh cuoi') ||
+                    lower.includes('cô dâu') || unaccented.includes('co dau');
+  const isCouple = lower.includes('couple') || lower.includes('cặp đôi') || unaccented.includes('cap doi') ||
+                   lower.includes('chụp đôi') || unaccented.includes('chup doi') ||
+                   lower.includes('2 đứa') || unaccented.includes('2 dua') ||
+                   lower.includes('hai đứa') || unaccented.includes('hai dua') ||
+                   lower.includes('người yêu') || unaccented.includes('nguoi yeu') ||
+                   lower.includes('bạn gái') || unaccented.includes('ban gai') ||
+                   lower.includes('bạn trai') || unaccented.includes('ban trai') ||
+                   lower.includes('chụp 2 người') || unaccented.includes('chup 2 nguoi') ||
+                   lower.includes('với người yêu') || unaccented.includes('voi nguoi yeu');
+  const isFamily = lower.includes('gia đình') || unaccented.includes('gia dinh') ||
+                   lower.includes('bố mẹ') || unaccented.includes('bo me') ||
+                   lower.includes('ba mẹ') || unaccented.includes('ba me') ||
+                   lower.includes('em bé') || unaccented.includes('em be') ||
+                   lower.includes('cho bé') || unaccented.includes('cho be') ||
+                   lower.includes('thôi nôi') || unaccented.includes('thoi noi') ||
+                   lower.includes('đầy tháng') || unaccented.includes('day thang');
+  const isAoDai = lower.includes('áo dài') || unaccented.includes('ao dai') || 
+                  lower.includes('cổ phục') || unaccented.includes('co phuc') ||
+                  lower.includes('việt phục') || unaccented.includes('viet phuc');
+  const isIndividual = lower.includes('cá nhân') || unaccented.includes('ca nhan') ||
+                       lower.includes('1 mình') || unaccented.includes('1 minh') ||
+                       lower.includes('một mình') || unaccented.includes('mot minh') ||
+                       lower.includes('nàng thơ') || unaccented.includes('nang tho') ||
+                       lower.includes('portrait') || lower.includes('chân dung') || unaccented.includes('chan dung') ||
+                       lower.includes('sinh nhật') || unaccented.includes('sinh nhat') ||
+                       lower.includes('profile') || lower.includes('indoor') || lower.includes('vintage') ||
+                       lower.includes('concept') || unaccented.includes('concept');
+
+  if (isWedding) {
+    // Ưu tiên Gói Cưới Hỏi / Pre-Wedding
+    detectedService = findServiceByCode(['CUOI_HOI', 'PRE_WEDDING']);
+  } else if (isCouple) {
+    // Ưu tiên Gói Couple / Cặp đôi
+    detectedService = findServiceByCode(['COUPLE', 'PRE_WEDDING']);
+  } else if (isFamily) {
+    // Ưu tiên Gói Gia Đình
+    detectedService = findServiceByCode(['GIA_DINH']);
+  } else if (isAoDai) {
+    // Ưu tiên Gói Áo Dài
+    detectedService = findServiceByCode(['AO_DAI']);
+  } else if (isGraduation && isGroup) {
+    // Kỷ yếu nhóm lớp tập thể
+    detectedService = findServiceByCode(['KY_YEU_NHOM', 'KY_YEU']);
+  } else if (isGraduation && !isGroup) {
+    // Khách chụp tốt nghiệp cá nhân 1 mình
+    detectedService = findServiceByCode(['CA_NHAN', 'KY_YEU']);
+  } else if (isGroup) {
+    // Kỷ yếu nhóm / lớp
+    detectedService = findServiceByCode(['KY_YEU_NHOM', 'KY_YEU']);
+  } else if (isIndividual) {
+    // Gói cá nhân / nàng thơ
+    detectedService = findServiceByCode(['CA_NHAN', 'NANG_THO']);
+  } else {
+    // Thử tìm theo từ khóa tên dịch vụ trong database
+    for (const s of activeServices) {
+      const sNameLower = s.name.toLowerCase();
+      if (lower.includes(sNameLower) || (s.code && lower.includes(s.code.toLowerCase().replace('_', ' ')))) {
+        detectedService = s;
+        break;
+      }
+    }
   }
 
   // Tier 8: Extract Location (HCM Districts)
@@ -350,7 +410,7 @@ export function classifyPostContent(
     lower.includes('2 người') || unaccented.includes('2 nguoi') ||
     lower.includes('2 bạn') || unaccented.includes('2 ban') ||
     lower.includes('hai bạn') || unaccented.includes('hai ban') ||
-    lower.includes('couple')
+    isCouple
   ) {
     pax = 2;
   } else if (
@@ -358,7 +418,8 @@ export function classifyPostContent(
     lower.includes('1 mình') || unaccented.includes('1 minh') ||
     lower.includes('1 người') || unaccented.includes('1 nguoi') ||
     lower.includes('cho em') || unaccented.includes('cho em') ||
-    lower.includes('cá nhân') || unaccented.includes('ca nhan')
+    lower.includes('cá nhân') || unaccented.includes('ca nhan') ||
+    (isGraduation && !isGroup)
   ) {
     pax = 1;
   } else {
@@ -366,6 +427,10 @@ export function classifyPostContent(
                      unaccented.match(/([0-9]+)\s*(nguoi|ban|thanh vien)/);
     if (numMatch) {
       pax = parseInt(numMatch[1], 10);
+    } else if (detectedService?.code === 'CA_NHAN') {
+      pax = 1;
+    } else if (detectedService?.code === 'COUPLE') {
+      pax = 2;
     }
   }
 
@@ -452,12 +517,13 @@ export function classifyPostContent(
   let suggestedCommentText: string | undefined = undefined;
   if (suggestedTemplate && detectedService && detectedService.is_active) {
     const formattedPrice = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(detectedService.base_price);
+    const cleanCustomerName = (customerName && customerName !== 'Khách hàng Facebook' && !customerName.includes('Người đóng góp')) ? customerName : 'bạn';
     suggestedCommentText = suggestedTemplate.template_content
       .replace('{gia}', formattedPrice)
       .replace('{khu_vuc}', location || 'TP. Hồ Chí Minh')
       .replace('{ho_tro_tao_dang}', detectedService.includes_posing_support ? 'có stylist hướng dẫn tạo dáng chi tiết' : '')
       .replace('{ten_dich_vu}', detectedService.name)
-      .replace('{ten_khach}', 'bạn');
+      .replace('{ten_khach}', cleanCustomerName);
   }
 
   // Tier 14: Intent & Realistic Confidence Score

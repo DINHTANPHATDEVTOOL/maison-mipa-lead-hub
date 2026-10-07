@@ -1,5 +1,6 @@
 import { FacebookGroup, GroupCheckStatus } from '@/types';
 import { getDbPool } from '../db';
+import { store } from '../store';
 
 export class GroupRepository {
   private static instance: GroupRepository;
@@ -12,43 +13,55 @@ export class GroupRepository {
   }
 
   public async getAll(): Promise<FacebookGroup[]> {
-    const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT 
-        id, 
-        name, 
-        url, 
-        check_interval_seconds, 
-        lookback_hours, 
-        status, 
-        last_checked_at, 
-        next_check_at, 
-        total_posts_found, 
-        last_error_message, 
-        can_page_comment, 
-        created_at
-      FROM facebook_groups
-      ORDER BY created_at DESC
-    `);
-    return res.rows.map(this.mapRow);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query(`
+        SELECT 
+          id, 
+          name, 
+          url, 
+          check_interval_seconds, 
+          lookback_hours, 
+          status, 
+          last_checked_at, 
+          next_check_at, 
+          total_posts_found, 
+          last_error_message, 
+          can_page_comment, 
+          created_at
+        FROM facebook_groups
+        ORDER BY created_at DESC
+      `);
+      if (res.rows.length > 0) {
+        return res.rows.map(this.mapRow);
+      }
+    } catch {}
+
+    return store.getGroups();
   }
 
   public async getById(id: string): Promise<FacebookGroup | null> {
-    const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT * FROM facebook_groups WHERE id = $1
-    `, [id]);
-    if (res.rows.length === 0) return null;
-    return this.mapRow(res.rows[0]);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query(`
+        SELECT * FROM facebook_groups WHERE id = $1
+      `, [id]);
+      if (res.rows.length > 0) return this.mapRow(res.rows[0]);
+    } catch {}
+
+    return store.getGroups().find(g => g.id === id) || null;
   }
 
   public async getByUrl(url: string): Promise<FacebookGroup | null> {
-    const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT * FROM facebook_groups WHERE url = $1
-    `, [url.trim()]);
-    if (res.rows.length === 0) return null;
-    return this.mapRow(res.rows[0]);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query(`
+        SELECT * FROM facebook_groups WHERE url = $1
+      `, [url.trim()]);
+      if (res.rows.length > 0) return this.mapRow(res.rows[0]);
+    } catch {}
+
+    return store.getGroups().find(g => g.url.trim().toLowerCase() === url.trim().toLowerCase()) || null;
   }
 
   public async create(data: {
@@ -145,15 +158,22 @@ export class GroupRepository {
     fields.push(`updated_at = NOW()`);
     values.push(id);
 
-    const res = await pool.query(`
-      UPDATE facebook_groups
-      SET ${fields.join(', ')}
-      WHERE id = $${idx}
-      RETURNING *
-    `, values);
+    let dbUpdated: FacebookGroup | null = null;
+    try {
+      const res = await pool.query(`
+        UPDATE facebook_groups
+        SET ${fields.join(', ')}
+        WHERE id = $${idx}
+        RETURNING *
+      `, values);
 
-    if (res.rows.length === 0) return null;
-    return this.mapRow(res.rows[0]);
+      if (res.rows.length > 0) {
+        dbUpdated = this.mapRow(res.rows[0]);
+      }
+    } catch {}
+
+    const storeUpdated = store.updateGroup(id, updates);
+    return dbUpdated || storeUpdated;
   }
 
   public async updateCheckTimestamps(

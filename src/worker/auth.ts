@@ -1,3 +1,4 @@
+import '../lib/env';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -189,16 +190,31 @@ export class FacebookAuthManager {
         const tag = payload.subarray(12, 28);
         const ciphertext = payload.subarray(28);
 
-        const decipher = crypto.createDecipheriv('aes-256-gcm', this.getKeyBuffer(), iv);
-        decipher.setAuthTag(tag);
-        let decrypted = decipher.update(ciphertext, undefined, 'utf8');
-        decrypted += decipher.final('utf8');
+        const candidateKeys = [
+          this.getKeyBuffer(),
+          crypto.createHash('sha256').update(this.deriveMachineKey()).digest(),
+          crypto.createHash('sha256').update(`${process.env.USER || 'rd'}:mipa-lead-hub-secure-auth-salt-v1`).digest(),
+        ];
 
-        const parsed = JSON.parse(decrypted);
-        if (parsed && Array.isArray(parsed.cookies)) {
-          const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
-          const hasXs = parsed.cookies.some((c: any) => c.name === 'xs');
-          if (hasCUser && hasXs) return parsed;
+        let decrypted: string | null = null;
+        for (const key of candidateKeys) {
+          try {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(tag);
+            let dec = decipher.update(ciphertext, undefined, 'utf8');
+            dec += decipher.final('utf8');
+            decrypted = dec;
+            break;
+          } catch {}
+        }
+
+        if (decrypted) {
+          const parsed = JSON.parse(decrypted);
+          if (parsed && Array.isArray(parsed.cookies)) {
+            const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
+            const hasXs = parsed.cookies.some((c: any) => c.name === 'xs');
+            if (hasCUser && hasXs) return parsed;
+          }
         }
       } catch (err) {
         console.error('[AuthManager] Lỗi giải mã phiên profile:', err);

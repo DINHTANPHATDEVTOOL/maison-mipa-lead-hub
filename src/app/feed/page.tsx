@@ -18,7 +18,8 @@ import {
   ShieldAlert,
   Key,
   Layers,
-  Tag
+  Tag,
+  Image as ImageIcon
 } from 'lucide-react';
 import { FacebookPost, PostIntent } from '@/types';
 import { apiFetch } from '@/lib/api-client';
@@ -35,6 +36,15 @@ export default function FeedQueuePage() {
   const [dispatchingId, setDispatchingId] = useState<string | null>(null);
   const [isSubmittingManual, setIsSubmittingManual] = useState(false);
   const [authErrorModal, setAuthErrorModal] = useState<{ open: boolean; message: string; post?: FacebookPost } | null>(null);
+
+  const getSafeImageUrl = (url?: string | null) => {
+    if (!url) return '';
+    if (url.startsWith('/api/proxy-image') || url.startsWith('data:') || url.startsWith('/')) return url;
+    if (url.includes('fbcdn.net') || url.includes('facebook.com')) {
+      return `/api/proxy-image?url=${encodeURIComponent(url)}`;
+    }
+    return url;
+  };
 
   useEffect(() => {
     fetchPosts();
@@ -76,6 +86,11 @@ export default function FeedQueuePage() {
           comment_content: textToSend,
           operator_name: 'Marketing Maison MIPA',
           is_manual_assisted: false,
+          post_url: post.post_url,
+          author_name: post.author_name,
+          content_raw: post.content_raw,
+          group_id: post.group_id,
+          group_name: post.group_name,
         }),
       });
 
@@ -119,6 +134,11 @@ export default function FeedQueuePage() {
           operator_name: 'Nhân viên Marketing',
           is_manual_assisted: true,
           manual_proof_url: manualLink,
+          post_url: manualPost.post_url,
+          author_name: manualPost.author_name,
+          content_raw: manualPost.content_raw,
+          group_id: manualPost.group_id,
+          group_name: manualPost.group_name,
         }),
       });
 
@@ -249,8 +269,49 @@ export default function FeedQueuePage() {
                 </div>
 
                 {/* Raw Post Content */}
-                <div className="p-3 rounded-lg bg-[#0e1118] border border-zinc-800/80 text-xs sm:text-sm text-zinc-200 leading-relaxed italic">
-                  "{post.content_raw}"
+                <div className="p-3.5 rounded-lg bg-[#0e1118] border border-zinc-800/80 text-xs sm:text-sm text-zinc-200 leading-relaxed space-y-3">
+                  <p className="italic">"{post.content_raw}"</p>
+
+                  {/* Post Images Preview */}
+                  {(post.media_preview_url || (post.image_urls && post.image_urls.length > 0)) && (
+                    <div className="pt-2 border-t border-zinc-800/50">
+                      <div className="flex items-center space-x-1.5 text-[11px] font-semibold text-amber-400 mb-2">
+                        <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Hình ảnh đính kèm ({post.image_urls?.length || 1}):</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                        {(post.image_urls && post.image_urls.length > 0 ? post.image_urls : [post.media_preview_url!]).map((imgUrl, imgIdx) => (
+                          <a
+                            key={imgIdx}
+                            href={imgUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="relative rounded-lg overflow-hidden border border-zinc-800/80 bg-zinc-950 group aspect-video sm:aspect-auto sm:h-44 transition-all duration-200 hover:border-amber-500/50 shadow-md block"
+                            title="Bấm để mở ảnh gốc đầy đủ"
+                          >
+                            <img
+                              src={getSafeImageUrl(imgUrl)}
+                              alt={`Ảnh đính kèm ${imgIdx + 1}`}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-300"
+                              onError={(e) => {
+                                const target = e.target as HTMLImageElement;
+                                if (!target.src.includes('/api/proxy-image')) {
+                                  target.src = `/api/proxy-image?url=${encodeURIComponent(imgUrl)}`;
+                                } else {
+                                  (e.target as HTMLElement).style.display = 'none';
+                                }
+                              }}
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-medium space-x-1 backdrop-blur-[2px]">
+                              <ImageIcon className="w-4 h-4 text-amber-300" />
+                              <span>Mở ảnh gốc</span>
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Structured Extraction Entity Boxes - Equal Sizes */}

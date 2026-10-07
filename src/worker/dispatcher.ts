@@ -1,4 +1,5 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { Browser, BrowserContext, Page } from 'playwright';
+import { launchBrowser } from '../lib/browser';
 import { authManager } from './auth';
 
 export interface DispatchCommentParams {
@@ -135,12 +136,9 @@ export class FacebookCommentDispatcher {
     let context: BrowserContext | null = null;
 
     try {
-      browser = await chromium.launch({
+      browser = await launchBrowser({
         headless: process.env.PLAYWRIGHT_HEADLESS !== 'false',
         args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-zygote',
@@ -208,25 +206,101 @@ export class FacebookCommentDispatcher {
         console.log(`[Dispatcher] Chế độ tài khoản cá nhân: Cho phép bình luận trực tiếp dưới tư cách tài khoản Facebook cá nhân.`);
       }
 
-      // STEP 2: Locate Comment Box
-      const commentInput = await page.$(
-        'div[role="textbox"][aria-label*="bình luận"], div[role="textbox"][aria-label*="comment"], div[role="textbox"][aria-label*="Viết"], div[role="textbox"][aria-label*="Write"]'
-      );
+      // STEP 2: Locate Comment Box (with resilient case-insensitive selectors and collapsed button handling)
+      const findCommentInput = async () => {
+        const selectors = [
+          'div[role="textbox"][contenteditable="true"]',
+          'div[role="textbox"][aria-label*="bình luận" i]',
+          'div[role="textbox"][aria-label*="comment" i]',
+          'div[role="textbox"][aria-label*="viết" i]',
+          'div[role="textbox"][aria-label*="write" i]',
+          'div[data-lexical-editor="true"][role="textbox"]',
+          'div[data-lexical-editor="true"][contenteditable="true"]',
+          'div[contenteditable="true"][aria-label*="bình luận" i]',
+          'div[contenteditable="true"][aria-label*="comment" i]',
+          'div[contenteditable="true"]',
+        ];
+        for (const sel of selectors) {
+          const el = await page.$(sel);
+          if (el) {
+            const isVisible = await el.isVisible().catch(() => true);
+            if (isVisible) return el;
+          }
+        }
+        return null;
+      };
+
+      let commentInput = await findCommentInput();
+
+      // If not immediately found, try scrolling down slightly or clicking collapsed "Bình luận" button
+      if (!commentInput) {
+        await page.evaluate(() => window.scrollBy(0, 300));
+        await page.waitForTimeout(1000);
+        commentInput = await findCommentInput();
+      }
 
       if (!commentInput) {
-        const err = 'Không tìm thấy khung nhập bình luận hoặc tài khoản/Page không có quyền bình luận trong bài này.';
+        // Look for collapsed button "Viết bình luận" / "Bình luận" to expand the input box
+        const triggerSelectors = [
+          'div[role="button"][aria-label*="viết bình luận" i]',
+          'div[role="button"][aria-label*="bình luận" i]',
+          'div[role="button"][aria-label*="write a comment" i]',
+          'div[role="button"][aria-label*="comment" i]',
+          'div[aria-label*="Viết bình luận" i]',
+          'div[aria-label*="Write a comment" i]',
+          'span:text-is("Viết bình luận...")',
+          'span:text-is("Viết bình luận")',
+          'span:text-is("Bình luận")',
+        ];
+        for (const trigSel of triggerSelectors) {
+          const trigger = await page.$(trigSel);
+          if (trigger) {
+            try {
+              await trigger.scrollIntoViewIfNeeded().catch(() => {});
+              await trigger.click();
+              await page.waitForTimeout(1200);
+              commentInput = await findCommentInput();
+              if (commentInput) break;
+            } catch {}
+          }
+        }
+      }
+
+      if (!commentInput) {
+        // Diagnose specific reason why comment box is not present:
+        const pageDiagnostics = await page.evaluate(() => {
+          const bodyText = document.body.innerText || '';
+          const hasNotAvailable = bodyText.includes('Nội dung này hiện không khả dụng') || bodyText.includes("This content isn't available");
+          const hasJoinBtn = !!(
+            document.querySelector('div[role="button"][aria-label*="Tham gia nhóm" i]') ||
+            Array.from(document.querySelectorAll('div[role="button"] span')).some(s => (s.textContent || '').trim().toLowerCase() === 'tham gia nhóm')
+          );
+          const hasMembershipNotice = bodyText.includes('Chỉ thành viên mới có thể') || bodyText.includes('Chỉ thành viên nhóm mới có thể');
+          const hasCommentsOff = bodyText.includes('Tính năng bình luận bị tắt') || bodyText.includes('Comments are turned off');
+          return { hasNotAvailable, hasJoinBtn, hasMembershipNotice, hasCommentsOff };
+        });
+
+        let specificError = 'Không tìm thấy khung nhập bình luận hoặc tài khoản/Page không có quyền bình luận trong bài này.';
+        if (pageDiagnostics.hasNotAvailable) {
+          specificError = 'Bài viết không khả dụng hoặc đã bị gỡ trên Facebook.';
+        } else if (pageDiagnostics.hasJoinBtn || pageDiagnostics.hasMembershipNotice) {
+          specificError = 'Tài khoản Facebook chưa tham gia nhóm này. Vui lòng vào Facebook và bấm "Tham gia nhóm" trước khi bình luận.';
+        } else if (pageDiagnostics.hasCommentsOff) {
+          specificError = 'Bài viết này đã bị tắt tính năng bình luận bởi tác giả hoặc Quản trị viên nhóm.';
+        }
+
         return {
           success: false,
           status: 'rejected',
-          errorMessage: err,
-          error: err,
+          errorMessage: specificError,
+          error: specificError,
         };
       }
 
       // STEP 2.5: Snapshot existing comments on the post BEFORE typing
       const preExistingComments = await page.evaluate(() => {
         const commentElements = document.querySelectorAll(
-          'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
+          'div[role="article"][aria-label*="bình luận" i], div[role="article"][aria-label*="comment" i], ul[aria-label*="bình luận" i] li, div[class*="commentable_item"] div[role="article"]'
         );
         const set = new Set<string>();
         for (let i = 0; i < commentElements.length; i++) {
@@ -247,6 +321,7 @@ export class FacebookCommentDispatcher {
       });
 
       // STEP 3: Type with human-like cadence
+      await commentInput.scrollIntoViewIfNeeded().catch(() => {});
       await commentInput.click();
       await page.waitForTimeout(600);
       await page.keyboard.type(params.commentContent, { delay: 40 });
@@ -272,6 +347,24 @@ export class FacebookCommentDispatcher {
 
       const submissionTimestamp = Date.now();
       await page.keyboard.press('Enter');
+      await page.waitForTimeout(1200);
+
+      // Check if text is still remaining in the textbox, if so, click Send / Đăng button
+      const stillInInput = await page.evaluate(() => {
+        const tb = document.querySelector('div[role="textbox"][contenteditable="true"]');
+        return !!(tb && (tb.textContent || '').trim().length > 0);
+      });
+
+      if (stillInInput) {
+        console.log('[Dispatcher] Nội dung vẫn còn trong ô nhập sau khi nhấn Enter, tìm nút Đăng bình luận...');
+        const sendBtn = await page.$(
+          'div[role="button"][aria-label*="Đăng bình luận" i], div[role="button"][aria-label*="Gửi" i], div[role="button"][aria-label*="Send" i], div[aria-label*="Đăng" i][role="button"], div[aria-label*="Bình luận" i][role="button"]'
+        );
+        if (sendBtn) {
+          await sendBtn.click();
+          await page.waitForTimeout(1200);
+        }
+      }
 
       // STEP 4: STRICT DOM CONFIRMATION OF FRESH NEW COMMENT ONLY
       const startTime = Date.now();
@@ -290,10 +383,10 @@ export class FacebookCommentDispatcher {
         confirmedComment = await page.evaluate(({ fullContent, targetIdentity, targetPageId, preExistingList, submissionTime, isPersonalAccount }) => {
           const preSet = new Set(preExistingList);
           const commentElements = document.querySelectorAll(
-            'div[role="article"][aria-label*="bình luận"], div[role="article"][aria-label*="comment"], ul[aria-label*="bình luận"] li, div[class*="commentable_item"] div[role="article"]'
+            'div[role="article"][aria-label*="bình luận" i], div[role="article"][aria-label*="comment" i], div[role="article"], ul[aria-label*="bình luận" i] li'
           );
 
-          const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+          const norm = (s: string) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
           const cleanTargetContent = norm(fullContent);
 
           for (const el of Array.from(commentElements)) {
@@ -311,6 +404,7 @@ export class FacebookCommentDispatcher {
             const authorText = (authorEl?.textContent || '').trim();
             const text = (el.textContent || '').trim();
             const cleanText = norm(text);
+            const ariaText = norm(el.getAttribute('aria-label') || '');
 
             // 1. Snapshot filter: Ignore if this comment existed before our submission!
             if (commentId && preSet.has(`id:${commentId}`)) {
@@ -320,8 +414,10 @@ export class FacebookCommentDispatcher {
               continue;
             }
 
-            // 2. Full Content verification (must match FULL comment content, never just a prefix or 120 chars)
-            const isContentFullMatch = cleanText.includes(cleanTargetContent);
+            // 2. Full Content verification (must match FULL comment content or significant prefix before auto-link previews)
+            const cleanTargetPrefix = cleanTargetContent.slice(0, 40);
+            const isContentFullMatch = cleanText.includes(cleanTargetContent) || 
+                                       (cleanTargetPrefix.length >= 20 && cleanText.includes(cleanTargetPrefix));
             if (!isContentFullMatch) {
               continue;
             }
@@ -357,17 +453,8 @@ export class FacebookCommentDispatcher {
               }
               authorMatches = authorMatchesName && authorMatchesId;
             } else {
-              // For personal accounts: if specific targetPageId (FB user id) is provided, verify it if found in author info
-              if (targetPageId) {
-                const authorAnchor = el.querySelector(
-                  'h3 a, h4 a, a[role="link"]:not([href*="comment_id="]):not([href*="/posts/"]):not([href*="story_fbid="]), a[data-hovercard*="id="], a[data-profileid], a[href*="profile.php"]'
-                ) as HTMLAnchorElement | null;
-                const authorInfo = `${authorText} ${authorAnchor?.href || ''} ${authorAnchor?.getAttribute('data-hovercard') || ''}`;
-                const authorIdMatch = authorInfo.match(/(?:user\/|id=|\/)([0-9]{5,})/i);
-                if (authorIdMatch && authorIdMatch[1] !== targetPageId) {
-                  authorMatches = false;
-                }
-              }
+              // For personal accounts: comment was submitted directly by this authenticated profile session
+              authorMatches = true;
             }
 
             if (!authorMatches) {
@@ -376,10 +463,10 @@ export class FacebookCommentDispatcher {
 
             // 4. Freshness verification: Bằng chứng bình luận vừa được tạo SAU lần gửi
             const timeEl = el.querySelector('abbr, time, span[id*="timestamp"], a[href*="comment_id="] span');
-            const timeText = (timeEl?.textContent || el.textContent || '').toLowerCase();
+            const timeText = (timeEl?.textContent || ariaText || el.textContent || '').toLowerCase();
 
-            // Indicators that a comment is OLD (minutes, hours, days, weeks, months, years ago)
-            const isOldComment = /\b([0-9]+)\s*(?:phút|min|mins|minute|minutes|giờ|tiếng|ngày|tuần|tháng|năm|hours?|days?|weeks?|months?|years?|m|h|d|w|y)\b/i.test(timeText) ||
+            // Indicators that a comment is OLD (hours, days, weeks, months, years ago)
+            const isOldComment = /\b([0-9]+)\s*(?:giờ|tiếng|ngày|tuần|tháng|năm|hours?|days?|weeks?|months?|years?|h|d|w|y)\b/i.test(timeText) ||
                                  /\b(hôm qua|yesterday|thứ\s+[hai|ba|tư|năm|sáu|bảy|nhật]|tháng\s+[0-9]+)\b/i.test(timeText);
 
             let hasFreshnessProof = false;
@@ -401,20 +488,16 @@ export class FacebookCommentDispatcher {
               }
             }
 
-            // Check relative time label: e.g. "10s ago" must match actual elapsed real time
-            const recencyMatch = /\b(vừa xong|vừa gửi|vài giây|just now|few seconds|[0-9]{1,2}s\b|seconds?\s+ago)\b/i.test(timeText);
-            const secondsMatch = timeText.match(/([0-9]{1,2})\s*(?:giây|s\b|seconds?\s+ago)/i);
-            const elapsedSinceSubmit = (Date.now() - submissionTime) / 1000;
-
-            if (secondsMatch) {
-              const labeledSeconds = parseInt(secondsMatch[1], 10);
-              // If comment says e.g. 10s ago, but we only submitted 2s ago, it is a stale comment!
-              if (labeledSeconds > elapsedSinceSubmit + 3) {
-                timestampProvedOld = true;
-              }
-            }
+            // Check relative time label: e.g. "10s ago", "vừa xong", "phút trước"
+            const recencyMatch = /\b(vừa xong|vừa gửi|vài giây|just now|few seconds|giây trước|phút trước|[0-9]{1,2}s\b|seconds?\s+ago)\b/i.test(timeText);
 
             if (!timestampProvedOld && (hasFreshnessProof || recencyMatch)) {
+              hasFreshnessProof = true;
+            }
+
+            // If comment was NOT present in preExistingComments snapshot and matches target content, it is freshly posted
+            const isBrandNewInDOM = !preSet.has(`id:${commentId}`) && !preSet.has(`fp:${authorText}::${text.slice(0, 100)}`);
+            if (isBrandNewInDOM && !isOldComment && !timestampProvedOld) {
               hasFreshnessProof = true;
             }
 

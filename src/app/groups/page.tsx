@@ -247,13 +247,16 @@ export default function GroupsPage() {
                   Link Nhóm Facebook (URL)
                 </label>
                 <input
-                  type="url"
+                  type="text"
                   required
-                  placeholder="https://facebook.com/groups/..."
+                  placeholder="https://facebook.com/groups/... hoặc https://web.facebook.com/share/g/..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg bg-zinc-900 border border-zinc-800 text-white text-xs focus:outline-none focus:border-amber-500"
+                  className="w-full h-9 px-3 rounded-lg bg-zinc-900 border border-zinc-800 text-white text-xs focus:outline-none focus:border-amber-500 font-mono"
                 />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Hỗ trợ cả link /groups/ và link chia sẻ mới /share/g/ (tự động xóa tracking mibextid, _rdc, _rdr).
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

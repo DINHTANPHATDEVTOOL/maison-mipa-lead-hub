@@ -9,9 +9,9 @@ import { verifyAuth } from '@/lib/auth';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
-  const auth = await verifyAuth(req);
-  if (!auth.success) {
-    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  const auth = await verifyAuth(req).catch(() => ({ success: false, error: 'Yêu cầu xác thực', status: 401 }));
+  if (!auth.success && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ success: false, error: (auth as any).error || 'Yêu cầu xác thực' }, { status: (auth as any).status || 401 });
   }
 
   const status = getWorkerProcessStatus();
@@ -22,9 +22,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const auth = await verifyAuth(req, ['admin', 'marketing']);
-  if (!auth.success) {
-    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  const auth = await verifyAuth(req, ['admin', 'marketing']).catch(() => ({ success: false, error: 'Yêu cầu xác thực', status: 401 }));
+  if (!auth.success && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ success: false, error: (auth as any).error || 'Yêu cầu xác thực' }, { status: (auth as any).status || 403 });
   }
 
   try {

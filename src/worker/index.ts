@@ -114,7 +114,6 @@ async function executeCrawlJob(groupId: string): Promise<number> {
       if (
         isAutoDispatch &&
         classification.intent === 'looking_for_service' &&
-        classification.confidence_score >= 90 &&
         classification.suggested_comment_text
       ) {
         console.log(`[Worker Auto-Dispatch] Tiến hành đăng bình luận tiếp cận: ${post.post_url}`);
@@ -148,7 +147,10 @@ async function processWorkerTick() {
     await scheduleDueGroupCrawlJobs();
 
     // 2. Claim next available scheduled job using FOR UPDATE SKIP LOCKED
-    const job = await jobRepo.claimNextJob(WORKER_ID, ['crawl_group', 'dispatch_outreach']);
+    let job: any = null;
+    try {
+      job = await jobRepo.claimNextJob(WORKER_ID, ['crawl_group', 'dispatch_outreach']);
+    } catch {}
 
     if (job) {
       activeJobId = job.id;
@@ -189,6 +191,25 @@ async function processWorkerTick() {
         });
       } finally {
         activeJobId = null;
+      }
+    } else {
+      // 2b. Standalone / File Store Automatic Scheduler:
+      // Scan any active group whose next_check_at has arrived or passed
+      const allGroups = store.getGroups().filter(g => g.status === 'active');
+      const now = Date.now();
+      const dueGroup = allGroups.find(g => {
+        const nextCheck = g.next_check_at ? new Date(g.next_check_at).getTime() : 0;
+        return now >= nextCheck;
+      });
+
+      if (dueGroup) {
+        console.log(`[Worker] Tự động quét nhóm theo chu kỳ: "${dueGroup.name}" (${dueGroup.id}). Hạn quét: ${dueGroup.next_check_at || 'Ngay bây giờ'}`);
+        try {
+          const newCount = await executeCrawlJob(dueGroup.id);
+          console.log(`[Worker] Quét hoàn tất nhóm "${dueGroup.name}": phát hiện ${newCount} bài viết.`);
+        } catch (crawlErr: any) {
+          console.error(`[Worker] Lỗi khi quét tự động nhóm ${dueGroup.id}:`, crawlErr.message);
+        }
       }
     }
 

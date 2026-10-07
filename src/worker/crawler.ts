@@ -1,4 +1,5 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { Browser, BrowserContext, Page } from 'playwright';
+import { launchBrowser } from '../lib/browser';
 import crypto from 'crypto';
 import { authManager } from './auth';
 
@@ -10,6 +11,9 @@ export interface RawExtractedPost {
   author_name: string;
   content_raw: string;
   posted_at: string;
+  raw_timestamp_text?: string;
+  image_urls?: string[];
+  media_preview_url?: string;
 }
 
 export interface CrawlGroupResult {
@@ -36,7 +40,7 @@ export function canonicalizeFacebookUrl(rawUrl: string): {
     const trackingKeys = [
       'mibextid', 'rdid', 'ref', 'share_id', '__tn__', 'set', 'type', 'app',
       'locale', 'comment_id', 'notif_id', 'notif_t', 'feedback_referrer',
-      '__cft__', 'paipv'
+      '__cft__', 'paipv', '_rdc', '_rdr', 'extid', 'fs', 's', 'wtsid', 'substory_index'
     ];
     trackingKeys.forEach(k => url.searchParams.delete(k));
 
@@ -78,6 +82,47 @@ export function canonicalizeFacebookUrl(rawUrl: string): {
 }
 
 /**
+ * Strips Facebook UI junk, SVG icon texts ("FacebookFacebook..."), Meta AI automated image descriptions,
+ * contributor badges, privacy labels, and tracking hashes to isolate the clean post status.
+ */
+export function cleanFacebookPostText(rawText: string): string {
+  if (!rawText) return '';
+
+  let text = rawText;
+
+  // 1. Remove repetitive SVG / Sprite / Logo "Facebook" text
+  text = text.replace(/(?:Facebook)+/gi, ' ');
+
+  // 2. Remove Facebook badges & contributor labels
+  text = text.replace(/(?:Người đóng góp đang lên|Quản trị viên|Người kiểm duyệt|Tác giả bài viết|Tác giả|Thành viên hàng đầu|Thành viên nhóm)\s*[·•\-]?/gi, ' ');
+
+  // 3. Remove privacy & sharing labels
+  text = text.replace(/(?:Đã chia sẻ với Nhóm công khai|Đã chia sẻ với Công khai|Nhóm công khai|Nhóm riêng tư|Chỉ mình tôi|Bạn bè)\s*[·•\-]?/gi, ' ');
+  text = text.replace(/Đã chia sẻ bài viết\s*[0-9]*/gi, ' ');
+
+  // 4. Remove timestamp leakages if caught in text
+  text = text.replace(/(?:[0-9]+\s*(?:ngày|giờ|phút|giây|tháng|tuần|h|m|d)\s*trước)\s*[·•\-]?/gi, ' ');
+
+  // 5. Remove Meta AI automatic image description text and trailing image previews
+  text = text.replace(/(?:Có thể là hình ảnh về|May be an image of)[\s\S]*?(?=(?:Ảnh từ bài viết|Đã chia sẻ|Facebook|$))/gi, ' ');
+
+  // 6. Remove image attribution / author card artifacts
+  text = text.replace(/Ảnh từ bài viết của\s*[^.\n]*/gi, ' ');
+
+  // 7. Remove UI buttons: "Xem thêm", "See more", reactions
+  text = text.replace(/\b(Xem thêm|See more)\b/gi, ' ');
+
+  // 8. Remove random tracking CDN domains / hash codes (e.g., 6lswXi.com, mALBh4mXcWj7EUtJlW0fl2JvvDuhs)
+  text = text.replace(/[a-zA-Z0-9_-]*\.com\b/gi, ' ');
+  text = text.replace(/\b[a-zA-Z0-9_-]{15,}\b/g, ' ');
+
+  // 9. Normalize whitespace and trim
+  text = text.replace(/\s+/g, ' ').trim();
+
+  return text;
+}
+
+/**
  * Parses Vietnamese Facebook post time into an ISO 8601 string
  */
 export function parseFacebookTimestamp(timeText: string): string {
@@ -104,6 +149,26 @@ export function parseFacebookTimestamp(timeText: string): string {
   if (dayMatch) {
     const days = parseInt(dayMatch[1], 10);
     return new Date(now - days * 86400 * 1000).toISOString();
+  }
+
+  const weekMatch = text.match(/([0-9]+)\s*(?:tuần|w|week)/);
+  if (weekMatch) {
+    const weeks = parseInt(weekMatch[1], 10);
+    return new Date(now - weeks * 7 * 86400 * 1000).toISOString();
+  }
+
+  // Explicit Vietnamese date formats: "5 tháng 10 lúc 14:30" or "ngày 5 tháng 10" or "5 thg 10"
+  const fullDateMatch = text.match(/([0-9]{1,2})\s*(?:tháng|thg|\/)\s*([0-9]{1,2})(?:\s*(?:năm|\/)\s*([0-9]{4}))?/);
+  if (fullDateMatch) {
+    const day = parseInt(fullDateMatch[1], 10);
+    const month = parseInt(fullDateMatch[2], 10) - 1; // 0-indexed
+    const year = fullDateMatch[3] ? parseInt(fullDateMatch[3], 10) : new Date().getFullYear();
+    const date = new Date(year, month, day);
+    const timeInDay = text.match(/([0-9]{1,2}):([0-9]{2})/);
+    if (timeInDay) {
+      date.setHours(parseInt(timeInDay[1], 10), parseInt(timeInDay[2], 10), 0, 0);
+    }
+    return date.toISOString();
   }
 
   if (text.includes('hôm qua') || text.includes('yesterday')) {
@@ -135,8 +200,12 @@ export function isValidFacebookUrl(rawUrl: string): { valid: boolean; error?: st
     if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost|0\.0\.0\.0|::1)/i.test(url.hostname)) {
       return { valid: false, error: 'Từ chối URL: Không được phép truy cập mạng nội bộ hoặc địa chỉ loopback.' };
     }
-    if (!url.pathname.includes('/groups/')) {
-      return { valid: false, error: 'URL không hợp lệ: Phải là đường dẫn nhóm Facebook (/groups/).' };
+    const isGroupOrShare =
+      url.pathname.includes('/groups/') ||
+      url.pathname.includes('/share/g/') ||
+      url.pathname.includes('/share/');
+    if (!isGroupOrShare) {
+      return { valid: false, error: 'URL không hợp lệ: Phải là đường dẫn nhóm Facebook (/groups/ hoặc link chia sẻ /share/g/).' };
     }
     return { valid: true };
   } catch {
@@ -179,14 +248,8 @@ export class FacebookGroupCrawler {
     let context: BrowserContext | null = null;
 
     try {
-      browser = await chromium.launch({
+      browser = await launchBrowser({
         headless: this.headless,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-blink-features=AutomationControlled',
-        ],
       });
 
       context = await browser.newContext({
@@ -197,9 +260,9 @@ export class FacebookGroupCrawler {
 
       const page: Page = await context.newPage();
 
-      // Ensure chronological sort URL to get NEWEST posts first
+      // Ensure chronological sort URL to get NEWEST posts first (if not a share redirect link)
       let targetUrl = groupUrl.trim();
-      if (!targetUrl.includes('sorting_setting=')) {
+      if (!targetUrl.includes('/share/') && !targetUrl.includes('sorting_setting=')) {
         targetUrl += targetUrl.includes('?') ? '&sorting_setting=CHRONOLOGICAL' : '?sorting_setting=CHRONOLOGICAL';
       }
 
@@ -243,48 +306,168 @@ export class FacebookGroupCrawler {
         };
       }
 
-      // Multi-scroll to load dynamic posts
+      // Enforce "Bài viết mới nhất" in Facebook UI filter if currently on Top / Relevant posts
+      try {
+        const sortFilter = await page.$(
+          'div[role="button"][aria-label*="sắp xếp" i], div[role="button"][aria-label*="sort" i], span:text-is("Phù hợp nhất"), span:text-is("Most relevant")'
+        );
+        if (sortFilter) {
+          await sortFilter.click();
+          await page.waitForTimeout(600);
+          const newestOption = await page.$(
+            'div[role="menuitem"]:has-text("Bài viết mới"), div[role="menuitem"]:has-text("New posts"), div[role="menuitem"]:has-text("Gần đây"), div[role="menuitem"]:has-text("Recent"), span:text-is("Bài viết mới"), span:text-is("New posts")'
+          );
+          if (newestOption) {
+            await newestOption.click();
+            await page.waitForTimeout(2000);
+          }
+        }
+      } catch {}
+
+      // Multi-scroll to load newest dynamic posts (focus on top feed, avoiding deep old post crawling)
       for (let s = 0; s < 3; s++) {
         await page.mouse.wheel(0, 1800);
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1800);
       }
 
-      // Extract raw DOM articles
+      // Extract raw DOM articles (STRICT: Posts ONLY, completely exclude comments and comment threads)
       const rawDOMPosts = await page.evaluate(() => {
         const articles: Array<{
           rawHref?: string;
           authorName: string;
           contentText: string;
           timestampText: string;
+          imageUrls?: string[];
         }> = [];
 
-        const elements = document.querySelectorAll(
-          'div[role="feed"] div[role="article"], div[data-ad-preview="message"], div[class*="userContentWrapper"]'
+        // Select candidate article blocks
+        const allArticles = document.querySelectorAll(
+          'div[role="feed"] div[role="article"], div[role="feed"] > div, div[data-ad-preview="message"]'
         );
 
-        elements.forEach((el) => {
-          const text = (el.textContent || '').trim();
-          if (text.length < 20) return;
+        allArticles.forEach((el) => {
+          // 1. FILTER OUT COMMENTS: Any article nested inside another article is a comment!
+          if (el.parentElement && el.parentElement.closest('div[role="article"]') !== null) {
+            return;
+          }
 
-          // Attempt to find permalink
-          const link = el.querySelector(
-            'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="]'
-          );
-          const rawHref = link ? (link as HTMLAnchorElement).href : undefined;
+          // 2. FILTER OUT COMMENT LISTS: Elements inside comment lists / comment sections
+          if (
+            el.closest('ul') !== null ||
+            el.closest('div[aria-label*="bình luận"]') !== null ||
+            el.closest('div[aria-label*="Bình luận"]') !== null ||
+            el.closest('div[aria-label*="Comment"]') !== null ||
+            el.closest('form') !== null
+          ) {
+            return;
+          }
 
-          // Author
-          const authorEl = el.querySelector('h2 a, strong a, a[role="link"] span, h3 a');
-          const authorName = authorEl ? (authorEl.textContent || 'Khách hàng Facebook') : 'Khách hàng Facebook';
+          const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+          if (
+            ariaLabel.includes('bình luận') ||
+            ariaLabel.includes('comment') ||
+            ariaLabel.includes('trả lời')
+          ) {
+            return;
+          }
 
-          // Timestamp
-          const timeEl = el.querySelector('abbr, a[aria-label*="phút"], a[aria-label*="giờ"], a[aria-label*="ngày"], span[id*="jsc_"] a');
-          const timestampText = timeEl ? (timeEl.textContent || timeEl.getAttribute('aria-label') || '') : '';
+          // 3. Extract Permalinks (SKIP links that point to specific comments: comment_id=)
+          const allLinks = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="]');
+          let rawHref: string | undefined = undefined;
+          for (let i = 0; i < allLinks.length; i++) {
+            const h = (allLinks[i] as HTMLAnchorElement).href;
+            if (h.includes('comment_id=') || h.includes('reply_comment_id=')) {
+              continue; // Skip comment permalinks
+            }
+            rawHref = h;
+            break;
+          }
+
+          // 4. Extract Clean Author Name
+          let authorName = 'Khách hàng Facebook';
+          const authorCandidates = el.querySelectorAll('h2 a, h3 a, strong a, header a, a[role="link"]');
+          for (const a of authorCandidates) {
+            const h = (a as HTMLAnchorElement).href || '';
+            const txt = (a.textContent || '').trim();
+            if (h.includes('/groups/') && !h.includes('/user/') && !h.includes('/profile.php')) continue;
+            if (
+              txt &&
+              txt.length >= 2 &&
+              txt.length <= 40 &&
+              !/^(Người đóng góp|Quản trị viên|Người kiểm duyệt|Tác giả|Facebook|Thành viên|Group|Nhóm|Bình luận)/i.test(txt)
+            ) {
+              authorName = txt;
+              break;
+            }
+          }
+
+          // 5. Extract Timestamp
+          let timestampText = '';
+          const timeElements = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="], abbr, a[aria-label]');
+          for (const te of timeElements) {
+            const aria = te.getAttribute('aria-label') || '';
+            const txt = (te.textContent || '').trim();
+            if (aria && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|min|hr|day|yesterday/i.test(aria) || /[0-9]{1,2}:[0-9]{2}/.test(aria))) {
+              timestampText = aria;
+              break;
+            }
+            if (txt && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|h|d|m|min/i.test(txt))) {
+              timestampText = txt;
+              break;
+            }
+          }
+
+          // 6. Extract ONLY the Post Content Body (Do NOT include SVGs, images alt-text or comments!)
+          let contentText = '';
+          const messageContainer = el.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-ad-rendering-role="story_message"]');
+          if (messageContainer && messageContainer.textContent) {
+            contentText = (messageContainer as HTMLElement).innerText || messageContainer.textContent;
+          } else {
+            // Clone and sanitize DOM node: Strip out SVGs, Images, comments and buttons before getting text
+            const clone = el.cloneNode(true) as HTMLElement;
+            // Strip SVGs, Images, Videos to prevent "FacebookFacebook..." and "Có thể là hình ảnh về..."
+            clone.querySelectorAll('svg, path, symbol, use, img, video, canvas, picture, audio').forEach(n => n.remove());
+            clone.querySelectorAll('header, h2, h3, h4, h5, h6').forEach(n => n.remove());
+            clone.querySelectorAll('ul, ol, form, button, [role="button"], [role="toolbar"], [role="dialog"], [role="menu"]').forEach(n => n.remove());
+            clone.querySelectorAll('[aria-label*="bình luận"], [aria-label*="Bình luận"], [aria-label*="comment"], [aria-label*="thích"], [aria-label*="like"], [aria-label*="chia sẻ"], [aria-label*="share"]').forEach(n => n.remove());
+            clone.querySelectorAll('[style*="display: none"], [style*="display:none"], [style*="clip:"], .visuallyhidden').forEach(n => n.remove());
+
+            contentText = clone.innerText || clone.textContent || '';
+          }
+
+          // 7. Extract Real Post Media/Images (Exclude avatars, emojis, and tracking icons)
+          const imageUrls: string[] = [];
+          const imgCandidates = el.querySelectorAll('img');
+          imgCandidates.forEach((img) => {
+            const src = (img as HTMLImageElement).src || img.getAttribute('src') || '';
+            if (!src || src.startsWith('data:') || src.includes('emoji.php') || src.includes('rsrc.php')) {
+              return;
+            }
+            if (img.closest('header, h2, h3, h4, a[aria-label*="avatar" i], div[role="button"][aria-label*="avatar" i]')) {
+              return;
+            }
+            const alt = (img.getAttribute('alt') || '').toLowerCase();
+            if (alt.includes('avatar') || alt.includes('ảnh đại diện')) {
+              return;
+            }
+            const w = (img as HTMLImageElement).naturalWidth || (img as HTMLElement).clientWidth || img.width || 0;
+            const h = (img as HTMLImageElement).naturalHeight || (img as HTMLElement).clientHeight || img.height || 0;
+            if ((w > 0 && w < 80) || (h > 0 && h < 80)) {
+              return;
+            }
+            if (src.includes('scontent') || src.includes('fbcdn.net') || src.includes('facebook.com')) {
+              if (!imageUrls.includes(src)) {
+                imageUrls.push(src);
+              }
+            }
+          });
 
           articles.push({
             rawHref,
             authorName: authorName.trim(),
-            contentText: text.slice(0, 1500),
+            contentText: contentText.slice(0, 2000),
             timestampText,
+            imageUrls,
           });
         });
 
@@ -304,6 +487,23 @@ export class FacebookGroupCrawler {
       const cutoffTime = Date.now() - lookbackHours * 3600 * 1000;
 
       for (const domItem of rawDOMPosts) {
+        // Clean Facebook UI artifacts, SVG icons, Meta image descriptions
+        const cleanContent = cleanFacebookPostText(domItem.contentText);
+        if (cleanContent.length < 10) {
+          continue;
+        }
+
+        // Refine author name if still default
+        let authorName = domItem.authorName;
+        if (!authorName || authorName === 'Khách hàng Facebook') {
+          const separated = domItem.contentText.replace(/([a-zà-ỹ]+)([a-z][A-Z]{2,}[a-zA-Z0-9]*)/, '$1 $2');
+          const noHash = separated.replace(/[a-zA-Z0-9_-]{15,}/g, ' ');
+          const sharedAuthorMatch = noHash.match(/Ảnh từ bài viết của\s+([A-ZÀ-Ỹ][a-zà-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹ]+)*?)(?=\s*(?:Đã chia sẻ|Facebook|$))/);
+          if (sharedAuthorMatch) {
+            authorName = sharedAuthorMatch[1].trim();
+          }
+        }
+
         const postedAtIso = parseFacebookTimestamp(domItem.timestampText);
         const postTimestamp = new Date(postedAtIso).getTime();
 
@@ -315,7 +515,7 @@ export class FacebookGroupCrawler {
         // Compute content fingerprint
         const contentHash = crypto
           .createHash('sha256')
-          .update(`${domItem.authorName}:${domItem.contentText.slice(0, 200)}`.toLowerCase())
+          .update(`${authorName}:${cleanContent.slice(0, 200)}`.toLowerCase())
           .digest('hex');
 
         let canonicalUrl: string;
@@ -341,11 +541,21 @@ export class FacebookGroupCrawler {
           post_url: canonicalUrl,
           post_url_hash: postUrlHash,
           content_hash: contentHash,
-          author_name: domItem.authorName,
-          content_raw: domItem.contentText,
+          author_name: authorName,
+          content_raw: cleanContent,
           posted_at: postedAtIso,
+          raw_timestamp_text: domItem.timestampText || undefined,
+          image_urls: domItem.imageUrls || [],
+          media_preview_url: domItem.imageUrls?.[0] || undefined,
         });
       }
+
+      // Strictly sort extracted posts by posted_at descending (newest first)
+      processedPosts.sort((a, b) => {
+        const timeA = new Date(a.posted_at).getTime();
+        const timeB = new Date(b.posted_at).getTime();
+        return timeB - timeA;
+      });
 
       return {
         success: true,

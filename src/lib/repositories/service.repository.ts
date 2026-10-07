@@ -1,5 +1,6 @@
 import { ServiceItem } from '@/types';
 import { getDbPool } from '../db';
+import { store } from '../store';
 
 export class ServiceRepository {
   private static instance: ServiceRepository;
@@ -12,20 +13,29 @@ export class ServiceRepository {
   }
 
   public async getAll(): Promise<ServiceItem[]> {
-    const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT id, code, name, base_price, price_note, service_area, includes_posing_support, is_active
-      FROM services
-      ORDER BY created_at ASC
-    `);
-    return res.rows.map(this.mapRow);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query(`
+        SELECT id, code, name, base_price, price_note, service_area, includes_posing_support, is_active
+        FROM services
+        ORDER BY created_at ASC
+      `);
+      if (res.rows.length > 0) {
+        return res.rows.map(this.mapRow);
+      }
+    } catch {}
+
+    return store.getServices();
   }
 
   public async getById(id: string): Promise<ServiceItem | null> {
-    const pool = getDbPool();
-    const res = await pool.query('SELECT * FROM services WHERE id = $1', [id]);
-    if (res.rows.length === 0) return null;
-    return this.mapRow(res.rows[0]);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query('SELECT * FROM services WHERE id = $1', [id]);
+      if (res.rows.length > 0) return this.mapRow(res.rows[0]);
+    } catch {}
+
+    return store.getServices().find(s => s.id === id) || null;
   }
 
   public async create(data: {
@@ -97,15 +107,23 @@ export class ServiceRepository {
     fields.push(`updated_at = NOW()`);
     values.push(id);
 
-    const res = await pool.query(`
-      UPDATE services
-      SET ${fields.join(', ')}
-      WHERE id = $${idx}
-      RETURNING *
-    `, values);
+    let dbUpdated: ServiceItem | null = null;
+    try {
+      const res = await pool.query(`
+        UPDATE services
+        SET ${fields.join(', ')}
+        WHERE id = $${idx}
+        RETURNING *
+      `, values);
 
-    if (res.rows.length === 0) return null;
-    return this.mapRow(res.rows[0]);
+      if (res.rows.length > 0) {
+        dbUpdated = this.mapRow(res.rows[0]);
+      }
+    } catch {}
+
+    // Always sync into persistent file store (data/mipa_shared_store.json)
+    const storeUpdated = store.updateService(id, updates);
+    return dbUpdated || storeUpdated;
   }
 
   private mapRow(row: any): ServiceItem {

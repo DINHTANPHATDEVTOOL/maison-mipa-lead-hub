@@ -161,6 +161,12 @@ export class TemplateRepository {
     }
   }
 
+  public async delete(id: string): Promise<boolean> {
+    const pool = getDbPool();
+    const res = await pool.query('DELETE FROM outreach_templates WHERE id = $1', [id]);
+    return (res.rowCount ?? 0) > 0;
+  }
+
   private mapRow(row: any): OutreachTemplate {
     let placeholders: string[] = [];
     try {

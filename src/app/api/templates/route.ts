@@ -14,13 +14,13 @@ export async function GET(req: Request) {
   }
 
   try {
-    const templates = await templateRepo.getAll();
+    let templates = await templateRepo.getAll();
+    if (templates.length === 0) {
+      templates = store.getTemplates();
+    }
     return NextResponse.json({ success: true, data: templates });
   } catch (err: any) {
-    if (process.env.NODE_ENV !== 'production') {
-      return NextResponse.json({ success: true, data: store.getTemplates() });
-    }
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: true, data: store.getTemplates() });
   }
 }
 
@@ -77,6 +77,76 @@ export async function PUT(req: Request) {
     }
 
     return NextResponse.json({ success: true, data: updated });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const auth = await verifyAuth(req, ['admin', 'marketing']);
+    if (!auth.success) {
+      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    }
+
+    const body = await req.json();
+    if (!body.title || !body.template_content || !body.service_id) {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Vui lòng nhập đầy đủ tiêu đề, nội dung kịch bản và phân loại dịch vụ' 
+      }, { status: 400 });
+    }
+
+    const payload = {
+      service_id: body.service_id,
+      title: body.title.trim(),
+      template_content: body.template_content.trim(),
+      allowed_placeholders: body.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'],
+      is_approved: body.is_approved !== undefined ? Boolean(body.is_approved) : true,
+      updated_by_name: auth.user?.name || 'Staff Maison MIPA',
+    };
+
+    let created;
+    try {
+      created = await templateRepo.create(payload);
+    } catch {
+      // Fallback local store if DB is unavailable
+      created = store.addTemplate(payload);
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        store.addTemplate({ ...payload, ...(created?.id ? { id: created.id } : {}) });
+      } catch {}
+    }
+
+    return NextResponse.json({ success: true, data: created });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const auth = await verifyAuth(req, ['admin', 'marketing']);
+    if (!auth.success) {
+      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    }
+
+    const url = new URL(req.url);
+    const id = url.searchParams.get('id') || (await req.json().catch(() => ({})))?.id;
+
+    if (!id) {
+      return NextResponse.json({ success: false, error: 'Thiếu ID kịch bản cần xóa' }, { status: 400 });
+    }
+
+    try {
+      await templateRepo.delete(id);
+    } catch {}
+
+    store.deleteTemplate(id);
+
+    return NextResponse.json({ success: true, message: 'Đã xóa kịch bản thành công' });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }

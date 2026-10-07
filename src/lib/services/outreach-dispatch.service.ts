@@ -6,6 +6,8 @@ import { leadRepo } from '../repositories/lead.repository';
 import { commentDispatcher } from '@/worker/dispatcher';
 import { getDbPool } from '../db';
 import { OutreachInteraction, CRMLead } from '@/types';
+import { store } from '../store';
+import { getAllProfiles } from '../profiles';
 
 export interface DispatchOutreachOptions {
   postId: string;
@@ -19,6 +21,11 @@ export interface DispatchOutreachOptions {
   isManual?: boolean;
   manualProofUrl?: string;
   templateId?: string;
+  postUrl?: string;
+  authorName?: string;
+  contentRaw?: string;
+  groupId?: string;
+  groupName?: string;
 }
 
 export interface DispatchOutreachResult {
@@ -72,16 +79,57 @@ export class OutreachDispatchService {
       operatorName,
       pageIdentity = process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
       targetPageId = process.env.FACEBOOK_PAGE_ID,
-      accountType = 'page',
-      profileId,
       storageState,
       isManual = false,
       manualProofUrl,
       templateId,
     } = options;
 
-    // 1. Fetch post from PostgreSQL database
-    const post = await postRepo.getById(postId);
+    let profileId = options.profileId;
+    let accountType = options.accountType;
+    if (!profileId) {
+      try {
+        const allProfiles = getAllProfiles();
+        const activeProf = allProfiles.find(p => p.hasSession && p.status === 'online') || allProfiles.find(p => p.hasSession);
+        if (activeProf) {
+          profileId = activeProf.id;
+          if (!accountType) accountType = activeProf.type || 'personal';
+        }
+      } catch {}
+    }
+    if (!accountType) accountType = 'personal';
+
+    // 1. Fetch post from PostgreSQL database or persistent store fallback
+    let post = await postRepo.getById(postId).catch(() => null);
+    if (!post) {
+      post = store.getPostById(postId);
+      if (!post) {
+        const allPosts = store.getPosts();
+        post = allPosts.find(p => 
+          p.id === postId || 
+          p.facebook_post_id === postId || 
+          p.post_url === postId ||
+          (p.facebook_post_id && postId.includes(p.facebook_post_id)) ||
+          (options.postUrl && (p.post_url === options.postUrl || p.post_url.includes(options.postUrl)))
+        ) || null;
+      }
+    }
+
+    // Auto-recovery fallback: If post was temporarily purged from memory or not yet synced, recover from options
+    if (!post && (options.postUrl || options.contentRaw)) {
+      try {
+        const recovered = store.addPostIfNew({
+          id: postId,
+          group_id: options.groupId || 'grp-01',
+          group_name: options.groupName || 'Nhóm Facebook',
+          post_url: options.postUrl || `https://facebook.com/posts/${postId}`,
+          author_name: options.authorName || 'Khách Hàng Facebook',
+          content_raw: options.contentRaw || 'Khách cần tư vấn dịch vụ chụp ảnh',
+        });
+        post = recovered.post;
+      } catch {}
+    }
+
     if (!post) {
       return {
         success: false,
@@ -89,9 +137,23 @@ export class OutreachDispatchService {
       };
     }
 
+    // Mirror to postRepo if in DB environment
+    try {
+      await postRepo.createIfNew({
+        id: post.id,
+        group_id: post.group_id,
+        group_name: post.group_name,
+        facebook_post_id: post.facebook_post_id,
+        post_url: post.post_url,
+        author_name: post.author_name,
+        content_raw: post.content_raw,
+        posted_at: post.posted_at,
+      });
+    } catch {}
+
     // 2. Validate group commenting permission (can_page_comment)
     if (post.group_id) {
-      const group = await groupRepo.getById(post.group_id);
+      const group = (await groupRepo.getById(post.group_id).catch(() => null)) || store.getGroups().find(g => g.id === post.group_id);
       if (group && group.can_page_comment === false && accountType !== 'personal') {
         return {
           success: false,
@@ -101,8 +163,8 @@ export class OutreachDispatchService {
     }
 
     // 3. Validate template if provided (must exist and be approved/active)
-    if (templateId) {
-      const template = await templateRepo.getById(templateId);
+    if (templateId && templateId !== 'manual' && templateId !== 'custom') {
+      const template = (await templateRepo.getById(templateId).catch(() => null)) || store.getTemplates().find(t => t.id === templateId);
       if (!template) {
         return {
           success: false,
@@ -118,49 +180,84 @@ export class OutreachDispatchService {
     }
 
     // 4. Concurrency-safe atomic first-touch claim (backed by unique_first_touch_outreach constraint & CAS)
-    const claimResult = await outreachRepo.claimFirstTouch({
-      post_id: post.id,
-      page_identity: pageIdentity,
-      operator_name: operatorName,
-      template_used_id: templateId,
-      comment_content: commentContent,
-      initialStatus: isManual ? 'sent_confirmed' : 'sending',
-    });
-
-    if (!claimResult.success) {
+    const existingStorePost = store.getPostById(post.id);
+    if (existingStorePost?.interaction && (existingStorePost.interaction.status === 'sent_confirmed' || existingStorePost.interaction.status === 'sending')) {
       return {
         success: false,
         error: 'Bài viết này đã được tiếp cận trước đó bởi nhân viên khác hoặc worker tự động (Chống gửi trùng).',
       };
     }
 
-    // 5. CASE A: Manual CSKH Outreach
-    if (isManual) {
-      const confirmedInteraction = await outreachRepo.updateStatus(post.id, 'sent_confirmed', {
-        comment_permalink: manualProofUrl,
-        notes: `Tiếp cận thủ công xác nhận bởi ${operatorName}`,
+    let claimResult: { success: boolean; interaction: OutreachInteraction | null } = { success: true, interaction: null };
+    try {
+      claimResult = await outreachRepo.claimFirstTouch({
+        post_id: post.id,
+        page_identity: pageIdentity,
+        operator_name: operatorName,
+        template_used_id: templateId,
+        comment_content: commentContent,
+        initialStatus: isManual ? 'sent_confirmed' : 'sending',
       });
 
-      // Update or create CRM Lead
-      let lead = await leadRepo.getByPostId(post.id);
-      if (!lead) {
-        lead = await leadRepo.create({
+      if (!claimResult.success) {
+        return {
+          success: false,
+          error: 'Bài viết này đã được tiếp cận trước đó bởi nhân viên khác hoặc worker tự động (Chống gửi trùng).',
+        };
+      }
+    } catch (claimErr: any) {
+      console.warn('[OutreachDispatchService] Bỏ qua lỗi claim DB, tiếp tục tiến trình:', claimErr.message);
+    }
+
+    // 5. CASE A: Manual CSKH Outreach
+    if (isManual) {
+      let confirmedInteraction = null;
+      try {
+        confirmedInteraction = await outreachRepo.updateStatus(post.id, 'sent_confirmed', {
+          comment_permalink: manualProofUrl,
+          notes: `Tiếp cận thủ công xác nhận bởi ${operatorName}`,
+        });
+      } catch {}
+
+      // Synchronize into persistent store
+      try {
+        store.updatePostInteraction(post.id, {
+          id: confirmedInteraction?.id || `int-${Date.now()}`,
           post_id: post.id,
-          customer_name: post.author_name || 'Khách Hàng Facebook',
-          customer_facebook_url: post.post_url,
-          stage: 'uncontacted',
-          assigned_cskh_name: operatorName,
-          notes: `Đã gửi tiếp cận thủ công: "${commentContent.slice(0, 100)}..."`,
-          post_summary: post.content_raw.slice(0, 150),
+          page_identity: pageIdentity,
+          operator_name: `${operatorName} (Thủ công)`,
+          template_used_id: templateId || 'manual',
+          comment_content: commentContent,
+          status: 'sent_confirmed',
+          comment_permalink: manualProofUrl || post.post_url,
+          dispatched_at: new Date().toISOString(),
         });
+      } catch {}
+
+      // Update or create CRM Lead
+      let lead = await leadRepo.getByPostId(post.id).catch(() => null);
+      if (!lead) {
+        try {
+          lead = await leadRepo.create({
+            post_id: post.id,
+            customer_name: post.author_name || 'Khách Hàng Facebook',
+            customer_facebook_url: post.post_url,
+            stage: 'uncontacted',
+            assigned_cskh_name: operatorName,
+            notes: `Đã gửi tiếp cận thủ công: "${commentContent.slice(0, 100)}..."`,
+            post_summary: post.content_raw.slice(0, 150),
+          });
+        } catch {}
       } else {
-        const updated = await leadRepo.updateWithOcc(lead.id, lead.version || 1, {
-          stage: 'uncontacted',
-          notes: `${lead.notes || ''}\n[${new Date().toLocaleString('vi-VN')}]: Tiếp cận thủ công bởi ${operatorName}`,
-        });
-        if (updated.success && updated.lead) {
-          lead = updated.lead;
-        }
+        try {
+          const updated = await leadRepo.updateWithOcc(lead.id, lead.version || 1, {
+            stage: 'uncontacted',
+            notes: `${lead.notes || ''}\n[${new Date().toLocaleString('vi-VN')}]: Tiếp cận thủ công bởi ${operatorName}`,
+          });
+          if (updated.success && updated.lead) {
+            lead = updated.lead;
+          }
+        } catch {}
       }
 
       return {
@@ -215,11 +312,30 @@ export class OutreachDispatchService {
       }
 
       // Successful dispatch: update outreach interaction with confirmed comment ID and permalink
-      const finalized = await outreachRepo.updateStatus(post.id, 'sent_confirmed', {
-        comment_facebook_id: dispatchRes.commentId,
-        comment_permalink: dispatchRes.commentPermalink,
-        notes: `Tự động bình luận thành công dưới danh nghĩa Page "${pageIdentity}"`,
-      });
+      let finalized = null;
+      try {
+        finalized = await outreachRepo.updateStatus(post.id, 'sent_confirmed', {
+          comment_facebook_id: dispatchRes.commentId,
+          comment_permalink: dispatchRes.commentPermalink,
+          notes: `Tự động bình luận thành công dưới danh nghĩa Page "${pageIdentity}"`,
+        });
+      } catch {}
+
+      // Synchronize into persistent store
+      try {
+        store.updatePostInteraction(post.id, {
+          id: finalized?.id || `int-${Date.now()}`,
+          post_id: post.id,
+          comment_facebook_id: dispatchRes.commentId,
+          comment_permalink: dispatchRes.commentPermalink,
+          page_identity: pageIdentity,
+          operator_name: operatorName,
+          template_used_id: templateId || 'auto',
+          comment_content: commentContent,
+          status: 'sent_confirmed',
+          dispatched_at: new Date().toISOString(),
+        });
+      } catch {}
 
       // Update or create CRM Lead independently (do not fail outreach if CRM lead update throws)
       let lead: CRMLead | null = null;

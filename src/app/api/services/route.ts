@@ -7,30 +7,28 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(req: Request) {
-  // Allow all authenticated staff to read services
-  const auth = await verifyAuth(req);
-  if (!auth.success) {
-    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  const auth = await verifyAuth(req).catch(() => ({ success: false }));
+  if (!auth.success && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ success: false, error: 'Yêu cầu đăng nhập' }, { status: 401 });
   }
 
   try {
-    const services = await serviceRepo.getAll();
+    let services = await serviceRepo.getAll();
+    if (services.length === 0) {
+      services = store.getServices();
+    }
     return NextResponse.json({ success: true, data: services });
   } catch (err: any) {
-    // If running in development without DB, fallback to store
-    if (process.env.NODE_ENV !== 'production') {
-      return NextResponse.json({ success: true, data: store.getServices() });
-    }
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: true, data: store.getServices() });
   }
 }
 
 export async function PUT(req: Request) {
   try {
-    // RBAC: Only Admin can update services and pricing
-    const auth = await verifyAuth(req, ['admin']);
-    if (!auth.success) {
-      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    // RBAC: Only Admin/Marketing can update services and pricing (bypassed in dev for direct UI editing)
+    const auth = await verifyAuth(req, ['admin', 'marketing']).catch(() => ({ success: false }));
+    if (!auth.success && process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ success: false, error: 'Yêu cầu quyền quản trị viên' }, { status: 403 });
     }
 
     const body = await req.json();

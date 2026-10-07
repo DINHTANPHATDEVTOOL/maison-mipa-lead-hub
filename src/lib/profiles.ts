@@ -26,110 +26,14 @@ const DEFAULT_PROFILES: FacebookProfile[] = [
   {
     id: 'dev-01',
     slot: 1,
-    name: 'Nick Cá Nhân 01 (Minh Tuấn)',
+    name: 'Thiết Bị 01',
     type: 'personal',
-    fbUserId: '100083281234567',
-    status: 'online',
-    todayComments: 12,
+    status: 'offline',
+    todayComments: 0,
     maxDailyComments: 45,
-    lastAction: 'Đang theo dõi nhóm Hội Tìm Thợ',
-    batteryLevel: 98,
-    hasSession: true,
-  },
-  {
-    id: 'dev-02',
-    slot: 2,
-    name: 'Maison MIPA Fanpage Official',
-    type: 'page',
-    pageId: '1000987654321',
-    pageName: 'Maison MIPA Photography',
-    fbUserId: '1000987654321',
-    status: 'online',
-    todayComments: 24,
-    maxDailyComments: 100,
-    lastAction: 'Đã bình luận bài viết lúc 16:15',
+    lastAction: 'Chưa có phiên đăng nhập',
     batteryLevel: 100,
-    hasSession: true,
-  },
-  {
-    id: 'dev-03',
-    slot: 3,
-    name: 'Nick Cá Nhân 02 (Lan Anh CSKH)',
-    type: 'personal',
-    fbUserId: '1000765432198',
-    status: 'online',
-    todayComments: 9,
-    maxDailyComments: 40,
-    lastAction: 'Sẵn sàng nhận việc',
-    batteryLevel: 95,
-    hasSession: true,
-  },
-  {
-    id: 'dev-04',
-    slot: 4,
-    name: 'Nick Cá Nhân 03 (Thợ Ảnh Sài Gòn)',
-    type: 'personal',
-    fbUserId: '1000654321987',
-    status: 'busy',
-    todayComments: 18,
-    maxDailyComments: 50,
-    lastAction: 'Đang mở bài viết Facebook...',
-    batteryLevel: 88,
-    hasSession: true,
-  },
-  {
-    id: 'dev-05',
-    slot: 5,
-    name: 'Nick Cá Nhân 04 (Maison Studio)',
-    type: 'personal',
-    fbUserId: '1000543219876',
-    status: 'idle',
-    todayComments: 6,
-    maxDailyComments: 35,
-    lastAction: 'Tạm nghỉ để giãn khoảng cách cmt',
-    batteryLevel: 92,
-    hasSession: true,
-  },
-  {
-    id: 'dev-06',
-    slot: 6,
-    name: 'Maison MIPA Studio - Chi Nhánh Q1',
-    type: 'page',
-    pageId: '1000432198765',
-    pageName: 'Maison MIPA Studio Q1',
-    fbUserId: '1000432198765',
-    status: 'online',
-    todayComments: 15,
-    maxDailyComments: 80,
-    lastAction: 'Sẵn sàng nhận việc',
-    batteryLevel: 97,
-    hasSession: true,
-  },
-  {
-    id: 'dev-07',
-    slot: 7,
-    name: 'Nick Cá Nhân 05 (Hoàng Nam Media)',
-    type: 'personal',
-    fbUserId: '1000321987654',
-    status: 'online',
-    todayComments: 4,
-    maxDailyComments: 30,
-    lastAction: 'Đang theo dõi nhóm Chụp Ảnh Cưới',
-    batteryLevel: 85,
-    hasSession: true,
-  },
-  {
-    id: 'dev-08',
-    slot: 8,
-    name: 'Nick Cá Nhân 06 (Khánh Linh Model)',
-    type: 'personal',
-    fbUserId: '1000219876543',
-    status: 'online',
-    todayComments: 8,
-    maxDailyComments: 40,
-    lastAction: 'Sẵn sàng nhận việc',
-    batteryLevel: 91,
-    hasSession: true,
+    hasSession: false,
   },
 ];
 
@@ -199,4 +103,39 @@ export function deleteProfile(id: string): boolean {
   if (filtered.length === profiles.length) return false;
   saveAllProfiles(filtered);
   return true;
+}
+
+export function cleanMockProfiles(): FacebookProfile[] {
+  const profiles = getAllProfiles();
+  const authDir = path.join(process.cwd(), 'data', 'auth', 'profiles');
+
+  // Keep profiles that have a real session file or have an active session
+  const real = profiles.filter((p) => {
+    const sessionFile = path.join(authDir, `${p.id}.enc`);
+    return fs.existsSync(sessionFile) || (p.id === 'dev-01' && p.hasSession);
+  });
+
+  const fallback: FacebookProfile[] = [
+    {
+      id: 'dev-01',
+      slot: 1,
+      name: 'Thiết Bị 01',
+      type: 'personal',
+      status: 'offline',
+      todayComments: 0,
+      maxDailyComments: 45,
+      lastAction: 'Chờ đăng nhập Facebook',
+      batteryLevel: 100,
+      hasSession: false,
+    },
+  ];
+
+  const finalProfiles: FacebookProfile[] = real.length > 0 ? real : fallback;
+
+  finalProfiles.forEach((p, idx) => {
+    p.slot = idx + 1;
+  });
+
+  saveAllProfiles(finalProfiles);
+  return finalProfiles;
 }

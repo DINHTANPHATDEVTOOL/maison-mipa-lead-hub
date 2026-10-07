@@ -10,8 +10,7 @@ build/
 dist/
 
 # Security & Facebook Sessions (CRITICAL)
-data/auth/*.json
-data/auth/*.enc
+data/auth/
 data/*.json
 data/*.tmp
 data/commits/

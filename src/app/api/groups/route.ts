@@ -42,6 +42,16 @@ export async function POST(req: Request) {
       cleanUrl = 'https://' + cleanUrl;
     }
 
+    const { isValidFacebookUrl, canonicalizeFacebookUrl } = await import('@/worker/crawler');
+    const validation = isValidFacebookUrl(cleanUrl);
+    if (!validation.valid) {
+      return NextResponse.json({ success: false, error: validation.error }, { status: 400 });
+    }
+
+    // Strip tracking parameters (mibextid, _rdc, _rdr, etc.)
+    const canon = canonicalizeFacebookUrl(cleanUrl);
+    cleanUrl = canon.canonicalUrl;
+
     const newGroup = await groupRepo.create({
       name: body.name.trim(),
       url: cleanUrl,

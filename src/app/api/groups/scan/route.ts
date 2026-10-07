@@ -35,7 +35,7 @@ export async function POST(req: Request) {
 
     const lookbackHours = Number(body.lookbackHours) || 24;
     const profileId = body.profileId === 'auto' ? undefined : body.profileId;
-    const autoDispatch = Boolean(body.autoDispatch);
+    const autoDispatch = body.autoDispatch !== undefined ? Boolean(body.autoDispatch) : true;
 
     console.log(`[API /api/groups/scan] Bắt đầu quét ${targetGroupIds.length} nhóm. Profile: ${profileId || 'Mặc định'}`);
 

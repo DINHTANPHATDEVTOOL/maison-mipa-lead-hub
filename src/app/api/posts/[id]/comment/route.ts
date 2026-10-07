@@ -22,12 +22,33 @@ export async function POST(
     const isManualAssisted = body.is_manual_assisted === true;
     const manualProofUrl = body.manual_proof_url;
     const templateId = body.template_id;
-    const accountType = body.account_type || 'page';
-    const profileId = body.profile_id;
+    const { getAllProfiles } = await import('@/lib/profiles');
+    const profiles = getAllProfiles();
+    let profileId = body.profile_id;
+    let accountType = body.account_type;
+
+    if (!profileId) {
+      const activeProf = profiles.find(p => p.hasSession && p.status === 'online') || profiles.find(p => p.hasSession);
+      if (activeProf) {
+        profileId = activeProf.id;
+        if (!accountType) {
+          accountType = activeProf.type || 'personal';
+        }
+      }
+    }
+    if (!accountType) {
+      accountType = 'personal';
+    }
 
     if (!commentContent || typeof commentContent !== 'string' || !commentContent.trim()) {
       return NextResponse.json({ success: false, error: 'Nội dung bình luận không được để trống' }, { status: 400 });
     }
+
+    const postUrl = body.post_url;
+    const authorName = body.author_name;
+    const contentRaw = body.content_raw;
+    const groupId = body.group_id;
+    const groupName = body.group_name;
 
     // 2. Dispatch via unified PostgreSQL outreach service
     const result = await outreachDispatchService.dispatchOutreach({
@@ -39,6 +60,11 @@ export async function POST(
       isManual: isManualAssisted,
       manualProofUrl,
       templateId,
+      postUrl,
+      authorName,
+      contentRaw,
+      groupId,
+      groupName,
     });
 
     if (!result.success) {

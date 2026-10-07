@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getAllProfiles, updateProfile, addProfile, deleteProfile } from '@/lib/profiles';
+import { getAllProfiles, updateProfile, addProfile, deleteProfile, cleanMockProfiles } from '@/lib/profiles';
 import { verifyAuth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
@@ -50,17 +50,56 @@ export async function POST(req: Request) {
       return NextResponse.json({ success: deleted });
     }
 
+    if (body.action === 'clean_mock_profiles') {
+      const remaining = cleanMockProfiles();
+      return NextResponse.json({
+        success: true,
+        message: 'Đã xóa toàn bộ nick mẫu, chỉ giữ lại tài khoản thật đã đăng nhập thành công.',
+        data: remaining,
+      });
+    }
+
     // Launch Chrome login for a specific profile
     if (body.action === 'launch_login' && body.id) {
       const { spawn } = await import('child_process');
       const path = await import('path');
+      const fs = await import('fs');
+
+      const authDir = path.join(process.cwd(), 'data', 'auth');
+      if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+
+      const logFile = path.join(authDir, `login_${body.id}.log`);
+      const logFd = fs.openSync(logFile, 'w');
+
+      // Initialize status
+      const statusFile = path.join(authDir, `login_status_${body.id}.json`);
+      fs.writeFileSync(
+        statusFile,
+        JSON.stringify(
+          {
+            profileId: body.id,
+            status: 'launching',
+            message: 'Đang mở cửa sổ trình duyệt Google Chrome...',
+            updatedAt: Date.now(),
+          },
+          null,
+          2
+        )
+      );
+
       const scriptPath = path.join(process.cwd(), 'scripts', 'facebook-login.ts');
+      const display = process.env.DISPLAY || ':0';
+      const xauth =
+        process.env.XAUTHORITY ||
+        (process.env.HOME ? path.join(process.env.HOME, '.Xauthority') : '/run/user/1000/gdm/Xauthority');
+
       const child = spawn('npx', ['tsx', scriptPath, body.id], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', logFd, logFd],
         env: {
           ...process.env,
-          DISPLAY: process.env.DISPLAY || ':0',
+          DISPLAY: display,
+          XAUTHORITY: xauth,
         },
       });
       child.unref();
@@ -69,6 +108,55 @@ export async function POST(req: Request) {
         success: true,
         message: `Đã mở cửa sổ Chrome đăng nhập cho thiết bị [${body.id}]. Hãy nhập tài khoản Facebook trên trình duyệt.`,
       });
+    }
+
+    // Check login status for a specific profile
+    if (body.action === 'check_login_status' && body.id) {
+      const path = await import('path');
+      const fs = await import('fs');
+      const statusFile = path.join(process.cwd(), 'data', 'auth', `login_status_${body.id}.json`);
+      if (fs.existsSync(statusFile)) {
+        try {
+          const raw = fs.readFileSync(statusFile, 'utf-8');
+          const data = JSON.parse(raw);
+          return NextResponse.json({ success: true, data });
+        } catch {}
+      }
+      return NextResponse.json({
+        success: true,
+        data: { profileId: body.id, status: 'idle', message: 'Chưa có phiên mở trình duyệt' },
+      });
+    }
+
+    // Cancel login process for a specific profile
+    if (body.action === 'cancel_login' && body.id) {
+      const path = await import('path');
+      const fs = await import('fs');
+      const pidFile = path.join(process.cwd(), 'data', 'auth', `login_pid_${body.id}.txt`);
+      if (fs.existsSync(pidFile)) {
+        try {
+          const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+          if (pid && !isNaN(pid)) {
+            process.kill(pid, 'SIGTERM');
+          }
+          fs.unlinkSync(pidFile);
+        } catch {}
+      }
+      const statusFile = path.join(process.cwd(), 'data', 'auth', `login_status_${body.id}.json`);
+      if (fs.existsSync(statusFile)) {
+        try {
+          fs.writeFileSync(
+            statusFile,
+            JSON.stringify({
+              profileId: body.id,
+              status: 'closed',
+              message: 'Đã hủy phiên đăng nhập bởi người dùng.',
+              updatedAt: Date.now(),
+            })
+          );
+        } catch {}
+      }
+      return NextResponse.json({ success: true, message: 'Đã dừng tiến trình đăng nhập.' });
     }
 
     // Save session storageState JSON for a specific profile

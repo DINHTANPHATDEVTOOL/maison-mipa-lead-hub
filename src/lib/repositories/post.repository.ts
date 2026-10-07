@@ -5,6 +5,7 @@ import { classifyPostContent, ClassificationResult } from '@/lib/classifier';
 import { leadRepo } from './lead.repository';
 import { serviceRepo } from './service.repository';
 import { templateRepo } from './template.repository';
+import { store } from '../store';
 
 export class PostRepository {
   private static instance: PostRepository;
@@ -79,65 +80,106 @@ export class PostRepository {
       LEFT JOIN lead_classifications c ON c.post_id = p.id
       LEFT JOIN outreach_interactions o ON o.post_id = p.id
       ${whereClause}
-      ORDER BY p.detected_at DESC
+      ORDER BY COALESCE(p.posted_at, p.detected_at) DESC, p.detected_at DESC
     `, params);
 
     return res.rows.map(this.mapRowWithRelations);
   }
 
   public async getById(id: string): Promise<FacebookPost | null> {
-    const pool = getDbPool();
-    const res = await pool.query(`
-      SELECT 
-        p.*,
-        c.id as class_id,
-        c.intent,
-        c.service_detected,
-        c.location,
-        c.pax,
-        c.shooting_date_text,
-        c.shooting_date_suggested,
-        c.budget_raw,
-        c.extra_requirements,
-        c.confidence_score,
-        c.classification_reason,
-        c.suggested_template_id,
-        c.suggested_comment_text,
-        c.review_status,
-        c.reviewed_by,
-        c.reviewed_at,
-        o.id as out_id,
-        o.page_identity,
-        o.operator_name,
-        o.template_used_id,
-        o.comment_content,
-        o.status as out_status,
-        o.comment_facebook_id,
-        o.comment_permalink,
-        o.error_message,
-        o.dispatched_at
-      FROM facebook_posts p
-      LEFT JOIN lead_classifications c ON c.post_id = p.id
-      LEFT JOIN outreach_interactions o ON o.post_id = p.id
-      WHERE p.id = $1
-    `, [id]);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query(`
+        SELECT 
+          p.*,
+          c.id as class_id,
+          c.intent,
+          c.service_detected,
+          c.location,
+          c.pax,
+          c.shooting_date_text,
+          c.shooting_date_suggested,
+          c.budget_raw,
+          c.extra_requirements,
+          c.confidence_score,
+          c.classification_reason,
+          c.suggested_template_id,
+          c.suggested_comment_text,
+          c.review_status,
+          c.reviewed_by,
+          c.reviewed_at,
+          o.id as out_id,
+          o.page_identity,
+          o.operator_name,
+          o.template_used_id,
+          o.comment_content,
+          o.status as out_status,
+          o.comment_facebook_id,
+          o.comment_permalink,
+          o.error_message,
+          o.dispatched_at
+        FROM facebook_posts p
+        LEFT JOIN lead_classifications c ON c.post_id = p.id
+        LEFT JOIN outreach_interactions o ON o.post_id = p.id
+        WHERE p.id = $1
+      `, [id]);
 
-    if (res.rows.length === 0) return null;
-    return this.mapRowWithRelations(res.rows[0]);
+      if (res.rows.length > 0) {
+        return this.mapRowWithRelations(res.rows[0]);
+      }
+    } catch {}
+
+    // Seamless fallback to store (data/mipa_shared_store.json)
+    try {
+      const sp = store.getPostById(id);
+      if (sp) return sp;
+      const allPosts = store.getPosts();
+      const matched = allPosts.find(p => 
+        p.id === id || 
+        p.facebook_post_id === id || 
+        p.post_url === id ||
+        (p.facebook_post_id && id.includes(p.facebook_post_id))
+      );
+      if (matched) return matched;
+    } catch {}
+
+    return null;
   }
 
   public async getByFacebookPostId(fbPostId: string): Promise<FacebookPost | null> {
-    const pool = getDbPool();
-    const res = await pool.query('SELECT id FROM facebook_posts WHERE facebook_post_id = $1', [fbPostId]);
-    if (res.rows.length === 0) return null;
-    return this.getById(res.rows[0].id);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query('SELECT id FROM facebook_posts WHERE facebook_post_id = $1', [fbPostId]);
+      if (res.rows.length > 0) {
+        return this.getById(res.rows[0].id);
+      }
+    } catch {}
+
+    try {
+      const allPosts = store.getPosts();
+      const sp = allPosts.find(p => p.facebook_post_id === fbPostId);
+      if (sp) return sp;
+    } catch {}
+
+    return null;
   }
 
   public async getByUrlHash(hash: string): Promise<FacebookPost | null> {
-    const pool = getDbPool();
-    const res = await pool.query('SELECT id FROM facebook_posts WHERE post_url_hash = $1', [hash]);
-    if (res.rows.length === 0) return null;
-    return this.getById(res.rows[0].id);
+    try {
+      const pool = getDbPool();
+      const res = await pool.query('SELECT id FROM facebook_posts WHERE post_url_hash = $1', [hash]);
+      if (res.rows.length > 0) {
+        return this.getById(res.rows[0].id);
+      }
+    } catch {}
+
+    try {
+      const allPosts = store.getPosts();
+      const sp = allPosts.find(p => p.post_url_hash === hash);
+      if (sp) return sp;
+    } catch {}
+
+    return null;
   }
 
   public async ensureClassification(existingPost: FacebookPost): Promise<ClassificationResult | undefined> {
@@ -228,6 +270,8 @@ export class PostRepository {
     author_name?: string;
     content_raw: string;
     posted_at?: string;
+    image_urls?: string[];
+    media_preview_url?: string;
   }): Promise<{ post: FacebookPost; isNew: boolean; classification?: ClassificationResult }> {
     const pool = getDbPool();
     const rawUrl = postData.post_url || '';
@@ -260,7 +304,7 @@ export class PostRepository {
 
     const services = await serviceRepo.getAll().catch(() => []);
     const templates = await templateRepo.getAll().catch(() => []);
-    const classification = classifyPostContent(postData.content_raw, services, templates, postData.posted_at);
+    const classification = classifyPostContent(postData.content_raw, services, templates, postData.posted_at, postData.author_name);
 
     const safeScore = Math.min(100, Math.max(0, Number(classification.confidence_score) || 0));
     const extraReqs = Array.isArray(classification.extra_requirements)
@@ -348,6 +392,20 @@ export class PostRepository {
         });
       } catch {}
     }
+
+    // Always sync into persistent file store (data/mipa_shared_store.json)
+    try {
+      store.addPostIfNew({
+        id: txResult.post.id,
+        group_id: txResult.post.group_id || 'manual',
+        group_name: txResult.post.group_name || 'Nhóm Facebook',
+        facebook_post_id: txResult.post.facebook_post_id,
+        post_url: txResult.post.post_url,
+        author_name: txResult.post.author_name,
+        content_raw: txResult.post.content_raw,
+        posted_at: txResult.post.posted_at,
+      });
+    } catch {}
 
     return { post: txResult.post, isNew: txResult.isNew, classification: txResult.classification };
   }
@@ -453,6 +511,8 @@ export class PostRepository {
       content_raw: row.content_raw,
       posted_at: row.posted_at ? new Date(row.posted_at).toISOString() : new Date().toISOString(),
       detected_at: row.detected_at ? new Date(row.detected_at).toISOString() : new Date().toISOString(),
+      image_urls: Array.isArray(row.image_urls) ? row.image_urls : (row.media_preview_url ? [row.media_preview_url] : []),
+      media_preview_url: row.media_preview_url || (Array.isArray(row.image_urls) && row.image_urls[0] ? row.image_urls[0] : undefined),
     };
 
     if (row.intent) {
