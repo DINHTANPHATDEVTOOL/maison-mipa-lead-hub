@@ -108,14 +108,14 @@ async function runTests() {
   // Nhóm cấm Page bình luận (can_page_comment = false)
   const restrictedGroup = await groupRepo.create({
     name: 'Nhóm Cấm Page Bình Luận',
-    url: 'https://facebook.com/groups/restricted_group_123',
+    url: `https://facebook.com/groups/restricted_group_123_${Date.now()}`,
     can_page_comment: false,
   });
 
   const postInRestricted = await postRepo.createIfNew({
     group_id: restrictedGroup.id,
-    content_raw: 'Cần thuê áo dài chụp ảnh tết',
-    post_url: 'https://facebook.com/groups/restricted_group_123/posts/111',
+    content_raw: `Cần thuê áo dài chụp ảnh tết ${Date.now()}`,
+    post_url: `https://facebook.com/groups/restricted_group_123/posts/${Date.now()}`,
   });
 
   const dispatchToRestricted = await outreachDispatchService.dispatchOutreach({
@@ -131,14 +131,14 @@ async function runTests() {
   // Kiểm tra lỗi trước submit (Pre-submit failure) cho phép retry:
   const openGroup = await groupRepo.create({
     name: 'Nhóm Mở Bình Luận',
-    url: 'https://facebook.com/groups/open_group_123',
+    url: `https://facebook.com/groups/open_group_123_${Date.now()}`,
     can_page_comment: true,
   });
 
   const normalPost = await postRepo.createIfNew({
     group_id: openGroup.id,
-    content_raw: 'Cần tư vấn gói chụp kỷ yếu trọn gói',
-    post_url: 'https://facebook.com/groups/open_group_123/posts/222',
+    content_raw: 'Cần tư vấn gói chụp kỷ yếu trọn gói ' + Date.now(),
+    post_url: `https://facebook.com/groups/open_group_123/posts/${Date.now() + 10}`,
   });
 
   // Giả lập tương tác thất bại trước submit bằng cách ghi status failed_before_submit

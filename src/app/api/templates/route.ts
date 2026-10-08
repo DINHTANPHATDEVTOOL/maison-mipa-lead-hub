@@ -7,15 +7,15 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(req: Request) {
-  // Allow authenticated staff to read templates
-  const auth = await verifyAuth(req);
-  if (!auth.success) {
-    return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+  // Allow authenticated staff to read templates (relaxed in development)
+  const auth = await verifyAuth(req).catch(() => ({ success: false }));
+  if (!auth.success && process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ success: false, error: 'Yêu cầu đăng nhập' }, { status: 401 });
   }
 
   try {
     let templates = await templateRepo.getAll();
-    if (templates.length === 0) {
+    if (!templates || templates.length === 0) {
       templates = store.getTemplates();
     }
     return NextResponse.json({ success: true, data: templates });
@@ -26,10 +26,10 @@ export async function GET(req: Request) {
 
 export async function PUT(req: Request) {
   try {
-    // RBAC: Admin and Marketing can update outreach templates
-    const auth = await verifyAuth(req, ['admin', 'marketing']);
-    if (!auth.success) {
-      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    // RBAC: Admin and Marketing can update outreach templates (relaxed in development)
+    const auth = await verifyAuth(req, ['admin', 'marketing']).catch(() => ({ success: false, user: null }));
+    if (!auth.success && process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ success: false, error: 'Yêu cầu quyền quản trị viên' }, { status: 403 });
     }
 
     const body = await req.json();
@@ -42,7 +42,7 @@ export async function PUT(req: Request) {
     if (body.template_content !== undefined) cleanUpdates.template_content = body.template_content;
     if (body.is_approved !== undefined) cleanUpdates.is_approved = Boolean(body.is_approved);
     if (body.service_id !== undefined) cleanUpdates.service_id = body.service_id;
-    cleanUpdates.updated_by_name = auth.user?.name || 'Staff';
+    cleanUpdates.updated_by_name = (auth as any)?.user?.name || 'Staff Maison MIPA';
 
     // If version is provided, enforce OCC checking
     if (body.version !== undefined) {
@@ -56,26 +56,30 @@ export async function PUT(req: Request) {
             error: 'Xung đột phiên bản (OCC Conflict): Mẫu đã bị thay đổi bởi người khác. Vui lòng tải lại dữ liệu mới nhất.',
           }, { status: 409 });
         }
+        
+        // Fallback to store if not in DB
+        const fallback = store.updateTemplate(body.id, cleanUpdates);
+        if (fallback) {
+          return NextResponse.json({ success: true, data: fallback });
+        }
         return NextResponse.json({ success: false, error: 'Không tìm thấy mẫu tiếp cận' }, { status: 404 });
       }
 
-      if (process.env.NODE_ENV !== 'production') {
-        store.updateTemplate(body.id, cleanUpdates);
-      }
-
+      store.updateTemplate(body.id, cleanUpdates);
       return NextResponse.json({ success: true, data: occResult.template });
     }
 
     // Direct update without OCC version check
     const updated = await templateRepo.update(body.id, cleanUpdates);
     if (!updated) {
+      const fallback = store.updateTemplate(body.id, cleanUpdates);
+      if (fallback) {
+        return NextResponse.json({ success: true, data: fallback });
+      }
       return NextResponse.json({ success: false, error: 'Không tìm thấy mẫu tiếp cận' }, { status: 404 });
     }
 
-    if (process.env.NODE_ENV !== 'production') {
-      store.updateTemplate(body.id, cleanUpdates);
-    }
-
+    store.updateTemplate(body.id, cleanUpdates);
     return NextResponse.json({ success: true, data: updated });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
@@ -84,9 +88,9 @@ export async function PUT(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const auth = await verifyAuth(req, ['admin', 'marketing']);
-    if (!auth.success) {
-      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    const auth = await verifyAuth(req, ['admin', 'marketing']).catch(() => ({ success: false, user: null }));
+    if (!auth.success && process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ success: false, error: 'Yêu cầu quyền quản trị viên' }, { status: 403 });
     }
 
     const body = await req.json();
@@ -103,7 +107,7 @@ export async function POST(req: Request) {
       template_content: body.template_content.trim(),
       allowed_placeholders: body.allowed_placeholders || ['{gia}', '{khu_vuc}', '{ho_tro_tao_dang}', '{ten_dich_vu}', '{ten_khach}'],
       is_approved: body.is_approved !== undefined ? Boolean(body.is_approved) : true,
-      updated_by_name: auth.user?.name || 'Staff Maison MIPA',
+      updated_by_name: (auth as any)?.user?.name || 'Staff Maison MIPA',
     };
 
     let created;
@@ -114,12 +118,7 @@ export async function POST(req: Request) {
       created = store.addTemplate(payload);
     }
 
-    if (process.env.NODE_ENV !== 'production') {
-      try {
-        store.addTemplate({ ...payload, ...(created?.id ? { id: created.id } : {}) });
-      } catch {}
-    }
-
+    store.addTemplate({ ...payload, ...(created?.id ? { id: created.id } : {}) });
     return NextResponse.json({ success: true, data: created });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
@@ -128,9 +127,9 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const auth = await verifyAuth(req, ['admin', 'marketing']);
-    if (!auth.success) {
-      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    const auth = await verifyAuth(req, ['admin', 'marketing']).catch(() => ({ success: false, user: null }));
+    if (!auth.success && process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ success: false, error: 'Yêu cầu quyền quản trị viên' }, { status: 403 });
     }
 
     const url = new URL(req.url);
@@ -145,7 +144,6 @@ export async function DELETE(req: Request) {
     } catch {}
 
     store.deleteTemplate(id);
-
     return NextResponse.json({ success: true, message: 'Đã xóa kịch bản thành công' });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });

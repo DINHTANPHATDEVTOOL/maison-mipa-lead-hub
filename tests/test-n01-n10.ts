@@ -111,10 +111,11 @@ async function runTests() {
   const client = await pool.connect();
 
   try {
+    const testPostUrl = `https://facebook.com/groups/wedding/posts/test_n10_${Date.now()}`;
     const postNoGroup = await postRepo.createIfNew({
       content_raw: 'Cần tìm studio chụp ảnh cưới phong cách Hàn Quốc tại Hà Nội',
       author_name: 'Lan Hương',
-      post_url: 'https://facebook.com/groups/wedding/posts/10000000001',
+      post_url: testPostUrl,
     });
     assert(postNoGroup.isNew, 'Bài viết phải được tạo mới');
     assert.strictEqual(postNoGroup.post.group_id, null, 'group_id phải là null khi không chọn nhóm');
@@ -132,7 +133,7 @@ async function runTests() {
     const healedResult = await postRepo.createIfNew({
       content_raw: 'Cần tìm studio chụp ảnh cưới phong cách Hàn Quốc tại Hà Nội',
       author_name: 'Lan Hương',
-      post_url: 'https://facebook.com/groups/wedding/posts/10000000001',
+      post_url: testPostUrl,
     });
 
     assert.strictEqual(healedResult.isNew, false, 'Bài viết cũ phải nhận diện isNew = false');
@@ -145,15 +146,17 @@ async function runTests() {
 
     // Test 5: N10 - Multiple posts with distinct Facebook Post IDs
     console.log('\n--- 5. Kiểm tra Hai Bài Viết Có Facebook Post ID Khác Nhau ---');
+    const uid1 = Date.now();
+    const uid2 = Date.now() + 1;
     const p1 = await postRepo.createIfNew({
-      facebook_post_id: 'fb_post_9991',
+      facebook_post_id: `fb_post_${uid1}`,
       content_raw: 'Tư vấn chụp ảnh gia đình 4 người',
-      post_url: 'https://facebook.com/posts/9991',
+      post_url: `https://facebook.com/posts/${uid1}`,
     });
     const p2 = await postRepo.createIfNew({
-      facebook_post_id: 'fb_post_9992',
+      facebook_post_id: `fb_post_${uid2}`,
       content_raw: 'Xin báo giá phóng ảnh kỷ yếu',
-      post_url: 'https://facebook.com/posts/9992',
+      post_url: `https://facebook.com/posts/${uid2}`,
     });
     assert(p1.isNew, 'Bài 1 phải tạo mới');
     assert(p2.isNew, 'Bài 2 phải tạo mới');

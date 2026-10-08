@@ -512,7 +512,7 @@ async function runE2ETests() {
 
     store.addGroup({
       name: 'Nhóm Thất Bại EIO',
-      url: 'https://facebook.com/groups/eio_test_group',
+      url: `https://facebook.com/groups/eio_test_group_${Date.now()}`,
       check_interval_seconds: 120,
       lookback_hours: 24,
       status: 'active',

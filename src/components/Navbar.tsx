@@ -20,6 +20,7 @@ export default function Navbar() {
   const [workerAlive, setWorkerAlive] = useState(false);
   const [operatingMode, setOperatingMode] = useState<'manual_review' | 'auto_dispatch'>('manual_review');
   const [staleSeconds, setStaleSeconds] = useState<number>(0);
+  const [isUpdatingMode, setIsUpdatingMode] = useState(false);
 
   useEffect(() => {
     fetchWorkerStatus();
@@ -40,6 +41,25 @@ export default function Navbar() {
       }
     } catch {
       setWorkerAlive(false);
+    }
+  };
+
+  const handleToggleMode = async () => {
+    if (isUpdatingMode) return;
+    setIsUpdatingMode(true);
+    const nextMode = operatingMode === 'auto_dispatch' ? 'manual_review' : 'auto_dispatch';
+    try {
+      const res = await apiFetch('/api/worker/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operating_mode: nextMode, min_confidence_score: 80 }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setOperatingMode(nextMode);
+      }
+    } catch {} finally {
+      setIsUpdatingMode(false);
     }
   };
 
@@ -110,9 +130,19 @@ export default function Navbar() {
                 {workerAlive ? 'Tiến trình: Đang chạy' : 'Tiến trình: Chưa bật'}
               </span>
               <span className="text-zinc-600">|</span>
-              <span className={`text-[11px] font-medium ${operatingMode === 'auto_dispatch' ? 'text-cyan-400' : 'text-amber-400'}`}>
-                {operatingMode === 'auto_dispatch' ? 'Tự động' : 'Duyệt tay'}
-              </span>
+              <button
+                type="button"
+                onClick={handleToggleMode}
+                disabled={isUpdatingMode}
+                title="Bấm để bật/tắt nhanh chế độ tự động gửi (Ngưỡng khớp ≥ 80%)"
+                className={`text-[11px] font-semibold px-2 py-0.5 rounded cursor-pointer transition-all hover:scale-105 ${
+                  operatingMode === 'auto_dispatch' 
+                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30' 
+                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30'
+                }`}
+              >
+                {operatingMode === 'auto_dispatch' ? '⚡ Tự động (≥80%)' : '✋ Duyệt tay'}
+              </button>
             </div>
 
             {/* Direct Tool Mode Indicator (Zero Friction - Mở tool là chạy) */}

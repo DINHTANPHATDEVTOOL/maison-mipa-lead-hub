@@ -47,7 +47,9 @@ export class GroupRepository {
         SELECT * FROM facebook_groups WHERE id = $1
       `, [id]);
       if (res.rows.length > 0) return this.mapRow(res.rows[0]);
-    } catch {}
+    } catch (err) {
+      console.error('[groupRepo.getById ERROR]:', err);
+    }
 
     return store.getGroups().find(g => g.id === id) || null;
   }
@@ -178,12 +180,12 @@ export class GroupRepository {
 
   public async updateCheckTimestamps(
     id: string,
-    lastCheckedAt: string | Date,
+    lastCheckedAt: string | Date | null | undefined,
     nextCheckAt: string | Date,
     totalPostsFound?: number
   ): Promise<FacebookGroup | null> {
     const updates: Partial<FacebookGroup> = {
-      last_checked_at: typeof lastCheckedAt === 'string' ? lastCheckedAt : lastCheckedAt.toISOString(),
+      last_checked_at: lastCheckedAt ? (typeof lastCheckedAt === 'string' ? lastCheckedAt : lastCheckedAt.toISOString()) : null,
       next_check_at: typeof nextCheckAt === 'string' ? nextCheckAt : nextCheckAt.toISOString(),
     };
     if (typeof totalPostsFound === 'number') {

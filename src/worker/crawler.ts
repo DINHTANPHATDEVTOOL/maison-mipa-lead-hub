@@ -266,7 +266,7 @@ export class FacebookGroupCrawler {
         targetUrl += targetUrl.includes('?') ? '&sorting_setting=CHRONOLOGICAL' : '?sorting_setting=CHRONOLOGICAL';
       }
 
-      console.log(`[Crawler] Đang mở nhóm Facebook (sắp xếp mới nhất): ${targetUrl}`);
+      console.log(`[Crawler] Đang mở nhóm Facebook: ${targetUrl}`);
       const response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
       if (!response || response.status() >= 400) {
         return {
@@ -287,8 +287,20 @@ export class FacebookGroupCrawler {
         };
       }
 
-      // Initial feed wait
-      await page.waitForTimeout(3000);
+      // Initial wait for feed container
+      await page.waitForTimeout(2500);
+
+      // Follow redirects to resolve canonical group URL and strictly enforce CHRONOLOGICAL sort
+      const afterNavUrl = page.url();
+      const groupMatch = afterNavUrl.match(/(https?:\/\/[^\/]+\/groups\/[^\/\?#]+)/);
+      if (groupMatch && !afterNavUrl.includes('sorting_setting=CHRONOLOGICAL')) {
+        const chronoUrl = `${groupMatch[1]}/?sorting_setting=CHRONOLOGICAL`;
+        console.log(`[Crawler] Đảm bảo sắp xếp bài mới nhất qua URL chuẩn: ${chronoUrl}`);
+        try {
+          await page.goto(chronoUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+          await page.waitForTimeout(2500);
+        } catch {}
+      }
 
       // Check if restricted / closed group
       const isRestricted = await page.evaluate(() => {
@@ -305,6 +317,24 @@ export class FacebookGroupCrawler {
           error: 'Tài khoản chưa tham gia hoặc không có quyền truy cập nhóm riêng tư này.',
         };
       }
+
+      // Helper to dismiss login dialogs and backdrop blockers
+      const dismissFacebookPopups = async () => {
+        try {
+          await page.keyboard.press('Escape');
+          const closeButtons = await page.$$(
+            'div[role="dialog"] div[aria-label="Đóng" i], div[role="dialog"] div[aria-label="Close" i], div[aria-label="Đóng" i], div[aria-label="Close" i], [aria-label*="Từ chối" i], [aria-label*="Decline" i]'
+          );
+          for (const btn of closeButtons) {
+            try {
+              await btn.click({ timeout: 600 });
+              await page.waitForTimeout(200);
+            } catch {}
+          }
+        } catch {}
+      };
+
+      await dismissFacebookPopups();
 
       // Enforce "Bài viết mới nhất" in Facebook UI filter if currently on Top / Relevant posts
       try {
@@ -324,155 +354,181 @@ export class FacebookGroupCrawler {
         }
       } catch {}
 
-      // Multi-scroll to load newest dynamic posts (focus on top feed, avoiding deep old post crawling)
-      for (let s = 0; s < 3; s++) {
-        await page.mouse.wheel(0, 1800);
-        await page.waitForTimeout(1800);
-      }
+      // Multi-scroll accumulator to gather posts across virtualization steps without losing items
+      const accumulatedDOMMap = new Map<string, {
+        rawHref?: string;
+        authorName: string;
+        contentText: string;
+        timestampText: string;
+        imageUrls?: string[];
+      }>();
 
-      // Extract raw DOM articles (STRICT: Posts ONLY, completely exclude comments and comment threads)
-      const rawDOMPosts = await page.evaluate(() => {
-        const articles: Array<{
-          rawHref?: string;
-          authorName: string;
-          contentText: string;
-          timestampText: string;
-          imageUrls?: string[];
-        }> = [];
+      for (let s = 0; s < 6; s++) {
+        await dismissFacebookPopups();
 
-        // Select candidate article blocks
-        const allArticles = document.querySelectorAll(
-          'div[role="feed"] div[role="article"], div[role="feed"] > div, div[data-ad-preview="message"]'
-        );
+        const currentBatch = await page.evaluate(() => {
+          const articles: Array<{
+            rawHref?: string;
+            authorName: string;
+            contentText: string;
+            timestampText: string;
+            imageUrls?: string[];
+          }> = [];
 
-        allArticles.forEach((el) => {
-          // 1. FILTER OUT COMMENTS: Any article nested inside another article is a comment!
-          if (el.parentElement && el.parentElement.closest('div[role="article"]') !== null) {
-            return;
-          }
+          // Select candidate top-level article blocks
+          const allArticles = Array.from(document.querySelectorAll('div[role="article"]')).filter((el) => {
+            return el.parentElement && el.parentElement.closest('div[role="article"]') === null;
+          });
 
-          // 2. FILTER OUT COMMENT LISTS: Elements inside comment lists / comment sections
-          if (
-            el.closest('ul') !== null ||
-            el.closest('div[aria-label*="bình luận"]') !== null ||
-            el.closest('div[aria-label*="Bình luận"]') !== null ||
-            el.closest('div[aria-label*="Comment"]') !== null ||
-            el.closest('form') !== null
-          ) {
-            return;
-          }
-
-          const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-          if (
-            ariaLabel.includes('bình luận') ||
-            ariaLabel.includes('comment') ||
-            ariaLabel.includes('trả lời')
-          ) {
-            return;
-          }
-
-          // 3. Extract Permalinks (SKIP links that point to specific comments: comment_id=)
-          const allLinks = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="]');
-          let rawHref: string | undefined = undefined;
-          for (let i = 0; i < allLinks.length; i++) {
-            const h = (allLinks[i] as HTMLAnchorElement).href;
-            if (h.includes('comment_id=') || h.includes('reply_comment_id=')) {
-              continue; // Skip comment permalinks
-            }
-            rawHref = h;
-            break;
-          }
-
-          // 4. Extract Clean Author Name
-          let authorName = 'Khách hàng Facebook';
-          const authorCandidates = el.querySelectorAll('h2 a, h3 a, strong a, header a, a[role="link"]');
-          for (const a of authorCandidates) {
-            const h = (a as HTMLAnchorElement).href || '';
-            const txt = (a.textContent || '').trim();
-            if (h.includes('/groups/') && !h.includes('/user/') && !h.includes('/profile.php')) continue;
+          allArticles.forEach((el) => {
+            // Filter out comment lists / comment sections
             if (
-              txt &&
-              txt.length >= 2 &&
-              txt.length <= 40 &&
-              !/^(Người đóng góp|Quản trị viên|Người kiểm duyệt|Tác giả|Facebook|Thành viên|Group|Nhóm|Bình luận)/i.test(txt)
+              el.closest('ul') !== null ||
+              el.closest('form') !== null ||
+              el.closest('div[aria-label*="bình luận" i]') !== null ||
+              el.closest('div[aria-label*="comment" i]') !== null
             ) {
-              authorName = txt;
+              return;
+            }
+
+            const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+            if (
+              ariaLabel.includes('bình luận') ||
+              ariaLabel.includes('comment') ||
+              ariaLabel.includes('trả lời')
+            ) {
+              return;
+            }
+
+            // Extract Permalinks (SKIP links that point to specific comments: comment_id=)
+            const allLinks = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="]');
+            let rawHref: string | undefined = undefined;
+            for (let i = 0; i < allLinks.length; i++) {
+              const h = (allLinks[i] as HTMLAnchorElement).href;
+              if (h.includes('comment_id=') || h.includes('reply_comment_id=')) {
+                continue;
+              }
+              rawHref = h;
               break;
             }
-          }
 
-          // 5. Extract Timestamp
-          let timestampText = '';
-          const timeElements = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="], abbr, a[aria-label]');
-          for (const te of timeElements) {
-            const aria = te.getAttribute('aria-label') || '';
-            const txt = (te.textContent || '').trim();
-            if (aria && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|min|hr|day|yesterday/i.test(aria) || /[0-9]{1,2}:[0-9]{2}/.test(aria))) {
-              timestampText = aria;
-              break;
-            }
-            if (txt && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|h|d|m|min/i.test(txt))) {
-              timestampText = txt;
-              break;
-            }
-          }
-
-          // 6. Extract ONLY the Post Content Body (Do NOT include SVGs, images alt-text or comments!)
-          let contentText = '';
-          const messageContainer = el.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-ad-rendering-role="story_message"]');
-          if (messageContainer && messageContainer.textContent) {
-            contentText = (messageContainer as HTMLElement).innerText || messageContainer.textContent;
-          } else {
-            // Clone and sanitize DOM node: Strip out SVGs, Images, comments and buttons before getting text
-            const clone = el.cloneNode(true) as HTMLElement;
-            // Strip SVGs, Images, Videos to prevent "FacebookFacebook..." and "Có thể là hình ảnh về..."
-            clone.querySelectorAll('svg, path, symbol, use, img, video, canvas, picture, audio').forEach(n => n.remove());
-            clone.querySelectorAll('header, h2, h3, h4, h5, h6').forEach(n => n.remove());
-            clone.querySelectorAll('ul, ol, form, button, [role="button"], [role="toolbar"], [role="dialog"], [role="menu"]').forEach(n => n.remove());
-            clone.querySelectorAll('[aria-label*="bình luận"], [aria-label*="Bình luận"], [aria-label*="comment"], [aria-label*="thích"], [aria-label*="like"], [aria-label*="chia sẻ"], [aria-label*="share"]').forEach(n => n.remove());
-            clone.querySelectorAll('[style*="display: none"], [style*="display:none"], [style*="clip:"], .visuallyhidden').forEach(n => n.remove());
-
-            contentText = clone.innerText || clone.textContent || '';
-          }
-
-          // 7. Extract Real Post Media/Images (Exclude avatars, emojis, and tracking icons)
-          const imageUrls: string[] = [];
-          const imgCandidates = el.querySelectorAll('img');
-          imgCandidates.forEach((img) => {
-            const src = (img as HTMLImageElement).src || img.getAttribute('src') || '';
-            if (!src || src.startsWith('data:') || src.includes('emoji.php') || src.includes('rsrc.php')) {
-              return;
-            }
-            if (img.closest('header, h2, h3, h4, a[aria-label*="avatar" i], div[role="button"][aria-label*="avatar" i]')) {
-              return;
-            }
-            const alt = (img.getAttribute('alt') || '').toLowerCase();
-            if (alt.includes('avatar') || alt.includes('ảnh đại diện')) {
-              return;
-            }
-            const w = (img as HTMLImageElement).naturalWidth || (img as HTMLElement).clientWidth || img.width || 0;
-            const h = (img as HTMLImageElement).naturalHeight || (img as HTMLElement).clientHeight || img.height || 0;
-            if ((w > 0 && w < 80) || (h > 0 && h < 80)) {
-              return;
-            }
-            if (src.includes('scontent') || src.includes('fbcdn.net') || src.includes('facebook.com')) {
-              if (!imageUrls.includes(src)) {
-                imageUrls.push(src);
+            // Extract Clean Author Name (supports standard links, anonymous pseudonyms, b and button headers)
+            let authorName = 'Khách hàng Facebook';
+            const header = el.querySelector('h2, h3, header');
+            if (header) {
+              const candidate = header.querySelector('div[role="button"], a[role="link"], strong, span[dir="auto"], b');
+              const txt = (candidate ? candidate.textContent : header.textContent) || '';
+              const cleanTxt = txt
+                .replace(/^(Người đóng góp|Quản trị viên|Người kiểm duyệt|Tác giả bài viết|Tác giả|Thành viên nhóm)\s*[·•\-]?/gi, '')
+                .trim();
+              if (cleanTxt && cleanTxt.length >= 2 && cleanTxt.length <= 60 && !/^(Facebook|Nhóm|Bình luận)/i.test(cleanTxt)) {
+                authorName = cleanTxt;
+              }
+            } else {
+              const authorCandidates = el.querySelectorAll('h2 a, h3 a, strong a, header a, a[role="link"]');
+              for (const a of authorCandidates) {
+                const h = (a as HTMLAnchorElement).href || '';
+                const txt = (a.textContent || '').trim();
+                if (h.includes('/groups/') && !h.includes('/user/') && !h.includes('/profile.php')) continue;
+                if (
+                  txt &&
+                  txt.length >= 2 &&
+                  txt.length <= 60 &&
+                  !/^(Người đóng góp|Quản trị viên|Người kiểm duyệt|Tác giả|Facebook|Thành viên|Group|Nhóm|Bình luận)/i.test(txt)
+                ) {
+                  authorName = txt;
+                  break;
+                }
               }
             }
+
+            // Extract Timestamp (exclude avatar stories and profile link aria-labels)
+            let timestampText = '';
+            const timeElements = el.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="fbid="], abbr, a[aria-label], span[aria-label]');
+            for (const te of timeElements) {
+              const aria = (te.getAttribute('aria-label') || '').trim();
+              const txt = (te.textContent || '').trim();
+              if (aria && /xem tin|avatar|ảnh đại diện|trang cá nhân/i.test(aria)) continue;
+              if (aria && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|min|hr|day|yesterday/i.test(aria) || /[0-9]{1,2}:[0-9]{2}/.test(aria) || /^[0-9]{1,2}\s*(?:h|m|d)\b/i.test(aria))) {
+                timestampText = aria;
+                break;
+              }
+              if (txt && (/phút|giờ|ngày|hôm qua|tháng|tuần|vừa xong|min|hr|day/i.test(txt) || /^[0-9]{1,2}\s*(?:h|m|d)\b/i.test(txt))) {
+                timestampText = txt;
+                break;
+              }
+            }
+
+            // Extract ONLY the Post Content Body
+            let contentText = '';
+            const messageContainer = el.querySelector('div[data-ad-preview="message"], div[data-ad-comet-preview="message"], div[data-ad-rendering-role="story_message"], div[dir="auto"][style*="text-align"]');
+            if (messageContainer && messageContainer.textContent) {
+              contentText = (messageContainer as HTMLElement).innerText || messageContainer.textContent;
+            } else {
+              const clone = el.cloneNode(true) as HTMLElement;
+              clone.querySelectorAll('svg, path, symbol, use, img, video, canvas, picture, audio').forEach(n => n.remove());
+              clone.querySelectorAll('header, h2, h3, h4, h5, h6').forEach(n => n.remove());
+              clone.querySelectorAll('ul, ol, form, button, [role="button"], [role="toolbar"], [role="dialog"], [role="menu"]').forEach(n => n.remove());
+              clone.querySelectorAll('[aria-label*="bình luận" i], [aria-label*="comment" i], [aria-label*="thích" i], [aria-label*="chia sẻ" i]').forEach(n => n.remove());
+              clone.querySelectorAll('[style*="display: none"], [style*="display:none"], [style*="clip:"], .visuallyhidden').forEach(n => n.remove());
+
+              contentText = clone.innerText || clone.textContent || '';
+            }
+
+            // Extract Real Post Media/Images
+            const imageUrls: string[] = [];
+            const imgCandidates = el.querySelectorAll('img');
+            imgCandidates.forEach((img) => {
+              const src = (img as HTMLImageElement).src || img.getAttribute('src') || '';
+              if (!src || src.startsWith('data:') || src.includes('emoji.php') || src.includes('rsrc.php')) {
+                return;
+              }
+              if (img.closest('header, h2, h3, h4, a[aria-label*="avatar" i], div[role="button"][aria-label*="avatar" i]')) {
+                return;
+              }
+              const alt = (img.getAttribute('alt') || '').toLowerCase();
+              if (alt.includes('avatar') || alt.includes('ảnh đại diện')) {
+                return;
+              }
+              const w = (img as HTMLImageElement).naturalWidth || (img as HTMLElement).clientWidth || img.width || 0;
+              const h = (img as HTMLImageElement).naturalHeight || (img as HTMLElement).clientHeight || img.height || 0;
+              if ((w > 0 && w < 80) || (h > 0 && h < 80)) {
+                return;
+              }
+              if (src.includes('scontent') || src.includes('fbcdn.net') || src.includes('facebook.com')) {
+                if (!imageUrls.includes(src)) {
+                  imageUrls.push(src);
+                }
+              }
+            });
+
+            if (contentText.trim().length > 10) {
+              articles.push({
+                rawHref,
+                authorName: authorName.trim(),
+                contentText: contentText.slice(0, 2000),
+                timestampText,
+                imageUrls,
+              });
+            }
           });
 
-          articles.push({
-            rawHref,
-            authorName: authorName.trim(),
-            contentText: contentText.slice(0, 2000),
-            timestampText,
-            imageUrls,
-          });
+          return articles;
         });
 
-        return articles;
-      });
+        // Merge batch into accumulator
+        currentBatch.forEach((item) => {
+          const key = item.rawHref || `${item.authorName}:${item.contentText.slice(0, 60)}`;
+          if (!accumulatedDOMMap.has(key)) {
+            accumulatedDOMMap.set(key, item);
+          }
+        });
+
+        await page.mouse.wheel(0, 1600);
+        await page.waitForTimeout(1600);
+      }
+
+      const rawDOMPosts = Array.from(accumulatedDOMMap.values());
 
       // Check commenting rights
       const canPageComment = await page.evaluate(() => {

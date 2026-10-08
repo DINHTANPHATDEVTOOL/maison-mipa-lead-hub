@@ -87,17 +87,24 @@ export class OutreachDispatchService {
 
     let profileId = options.profileId;
     let accountType = options.accountType;
+    if (!accountType) {
+      if (options.targetPageId || options.pageIdentity || !options.profileId) {
+        accountType = 'page';
+      }
+    }
     if (!profileId) {
       try {
         const allProfiles = getAllProfiles();
         const activeProf = allProfiles.find(p => p.hasSession && p.status === 'online') || allProfiles.find(p => p.hasSession);
         if (activeProf) {
           profileId = activeProf.id;
-          if (!accountType) accountType = activeProf.type || 'personal';
+          if (!accountType) accountType = activeProf.type || 'page';
         }
       } catch {}
     }
-    if (!accountType) accountType = 'personal';
+    if (!accountType) {
+      accountType = 'page';
+    }
 
     // 1. Fetch post from PostgreSQL database or persistent store fallback
     let post = await postRepo.getById(postId).catch(() => null);

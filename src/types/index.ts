@@ -148,4 +148,5 @@ export interface WorkerHeartbeat {
   active_jobs_count: number;
   last_ping: string | null;
   operating_mode: 'manual_review' | 'auto_dispatch';
+  min_confidence_score?: number;
 }

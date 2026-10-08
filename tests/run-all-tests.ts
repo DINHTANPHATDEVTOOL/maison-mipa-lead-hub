@@ -18,6 +18,17 @@ function cleanTestDataAndLocks() {
       }
     } catch {}
   }
+  const storePath = path.join(dataDir, 'mipa_shared_store.json');
+  if (fs.existsSync(storePath)) {
+    try {
+      const raw = fs.readFileSync(storePath, 'utf8');
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.posts)) data.posts = data.posts.filter((p: any) => !p.id.startsWith('post-br-') && !p.id.startsWith('post_test_'));
+      if (Array.isArray(data.leads)) data.leads = data.leads.filter((l: any) => !l.id.startsWith('lead-br-') && !l.id.startsWith('lead_test_'));
+      if (Array.isArray(data.groups)) data.groups = data.groups.filter((g: any) => !g.id.startsWith('grp-br-') && !g.id.startsWith('grp-test-'));
+      fs.writeFileSync(storePath, JSON.stringify(data, null, 2), 'utf8');
+    } catch {}
+  }
 }
 
 const testSuites = [

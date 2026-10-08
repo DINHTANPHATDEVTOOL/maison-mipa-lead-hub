@@ -110,7 +110,8 @@ async function runPhaseCTests() {
   console.log('\n[TEST GROUP 3] TASK 06: Facebook Session Encryption & Key Lifecycle');
 
   const testKey = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-  const customAuth = new FacebookAuthManager(testKey);
+  const testAuthDir = path.join(process.cwd(), 'data', `test_auth_${Date.now()}`);
+  const customAuth = new FacebookAuthManager(testKey, testAuthDir);
 
   // Sample valid Facebook storageState
   const sampleSession = JSON.stringify({
@@ -129,14 +130,14 @@ async function runPhaseCTests() {
   assert(summary.exists && summary.valid && summary.userId === '100083281234567', 'AUTH-SEC-01.2: Session validated and user ID extracted');
 
   // Verify that encrypted file is NOT plaintext JSON
-  const encFile = path.join(process.cwd(), 'data', 'auth', 'facebook_storage_state.enc');
+  const encFile = path.join(testAuthDir, 'facebook_storage_state.enc');
   assert(fs.existsSync(encFile), 'AUTH-SEC-01.3: Encrypted session file exists on disk');
   const encRaw = fs.readFileSync(encFile);
   assert(!encRaw.toString('utf-8').includes('100083281234567'), 'AUTH-SEC-01.4: Encrypted file contains zero plaintext credentials');
 
   // AUTH-SEC-02: Clear plaintext and delete session
   customAuth.clearPlaintextSession();
-  const plainFile = path.join(process.cwd(), 'data', 'auth', 'facebook_storage_state.json');
+  const plainFile = path.join(testAuthDir, 'facebook_storage_state.json');
   assert(!fs.existsSync(plainFile), 'AUTH-SEC-02.1: Plaintext session file removed after clearPlaintextSession()');
 
   // Re-reading decrypts securely
@@ -146,6 +147,7 @@ async function runPhaseCTests() {
   // Delete session completely
   customAuth.deleteSession();
   assert(!customAuth.hasStoredSession(), 'AUTH-SEC-02.3: deleteSession() removes all session files cleanly');
+  try { fs.rmSync(testAuthDir, { recursive: true, force: true }); } catch {}
 
   // AUTH-SEC-03: Production mode requires explicit key
   const origEnv = process.env.NODE_ENV;

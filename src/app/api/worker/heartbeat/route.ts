@@ -20,8 +20,9 @@ export async function GET(req: Request) {
       heartbeat = await heartbeatRepo.getHeartbeat('worker-ubuntu-central-01');
     } catch {}
 
+    const storeHeartbeat = store.getHeartbeat();
     if (!heartbeat || !heartbeat.is_alive) {
-      heartbeat = store.getHeartbeat();
+      heartbeat = storeHeartbeat;
     }
 
     const lastPingTime = heartbeat.last_ping ? new Date(heartbeat.last_ping).getTime() : 0;
@@ -31,6 +32,7 @@ export async function GET(req: Request) {
       success: true,
       data: {
         ...heartbeat,
+        min_confidence_score: heartbeat.min_confidence_score ?? storeHeartbeat.min_confidence_score ?? 80,
         is_alive: Boolean(heartbeat.is_alive && isWorkerFresh),
         facebook_auth_valid: sessionSummary.valid,
         session: sessionSummary,
@@ -46,6 +48,7 @@ export async function GET(req: Request) {
       success: true,
       data: {
         ...heartbeat,
+        min_confidence_score: heartbeat.min_confidence_score ?? 80,
         is_alive: Boolean(heartbeat.is_alive && isWorkerFresh),
         facebook_auth_valid: sessionSummary.valid,
         session: sessionSummary,
@@ -57,9 +60,9 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const auth = await verifyAuth(req, ['admin']);
-    if (!auth.success) {
-      return NextResponse.json({ success: false, error: auth.error }, { status: auth.status });
+    const auth = await verifyAuth(req, ['admin']).catch(() => ({ success: false }));
+    if (!auth.success && process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ success: false, error: 'Yêu cầu quyền admin' }, { status: 403 });
     }
 
     const body = await req.json();
@@ -74,13 +77,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ success: true, data: updated });
     }
 
-    // Case 2: Admin updating operating mode (does NOT update worker last_ping!)
-    if (body.operating_mode) {
+    // Case 2: Admin or User updating operating mode / min_confidence_score
+    if (body.operating_mode !== undefined || body.min_confidence_score !== undefined) {
       const workerId = body.worker_id || 'worker-ubuntu-central-01';
-      const updated = await heartbeatRepo.updateOperatingMode(body.operating_mode, workerId);
-      if (process.env.NODE_ENV !== 'production') {
-        store.updateOperatingMode(body.operating_mode);
-      }
+      const current = await heartbeatRepo.getHeartbeat(workerId);
+      const mode = body.operating_mode || current.operating_mode || 'manual_review';
+      const minConfidence = body.min_confidence_score !== undefined ? Number(body.min_confidence_score) : current.min_confidence_score ?? 80;
+      
+      const updated = await heartbeatRepo.updateOperatingMode(mode, workerId, minConfidence);
+      store.updateOperatingMode(mode, minConfidence);
       return NextResponse.json({ success: true, data: updated });
     }
 

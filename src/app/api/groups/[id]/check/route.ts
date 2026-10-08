@@ -34,7 +34,10 @@ export async function POST(
       }, { status: 400 });
     }
 
-    // 2. Enqueue persistent crawl job for Background Worker (Playwright container)
+    // 2. Set next_check_at to NOW so periodic scheduler also treats it as immediately due
+    await groupRepo.updateCheckTimestamps(group.id, group.last_checked_at || undefined, new Date().toISOString()).catch(() => {});
+
+    // 3. Enqueue persistent crawl job for Background Worker
     const { jobRepo } = await import('@/lib/repositories/job.repository');
     const job = await jobRepo.createJob({
       id: `crawl_${group.id}`,
@@ -46,9 +49,19 @@ export async function POST(
       },
     });
 
+    // 4. Check if worker is running; auto-start if not
+    const { isWorkerRunning, startWorkerProcess } = await import('@/lib/worker-process');
+    let workerNotice = '';
+    if (!isWorkerRunning()) {
+      const startRes = startWorkerProcess();
+      if (startRes.success) {
+        workerNotice = ' (Đã tự động khởi chạy Worker nền)';
+      }
+    }
+
     return NextResponse.json({
       success: true,
-      message: `Đã đưa nhóm "${group.name}" vào hàng đợi quét của Background Worker.`,
+      message: `Đã đưa nhóm "${group.name}" vào quét ngay lập tức.${workerNotice}`,
       job_id: job.id,
       status: 'queued',
     });

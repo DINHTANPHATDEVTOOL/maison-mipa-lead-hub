@@ -594,6 +594,7 @@ class LeadHubSharedStore {
         active_jobs_count: 0,
         last_ping: null,
         operating_mode: 'manual_review',
+        min_confidence_score: 80,
       }
     };
   }
@@ -606,6 +607,12 @@ class LeadHubSharedStore {
   public addGroup(data: Omit<FacebookGroup, 'id' | 'last_checked_at' | 'next_check_at' | 'total_posts_found' | 'last_error_message' | 'created_at'>): FacebookGroup {
     return this.withFileLock(() => {
       const storeData = this.readData();
+      const normUrl = data.url.trim().toLowerCase().replace(/\/+$/, '');
+      const existing = storeData.groups.find(g => g.url.trim().toLowerCase().replace(/\/+$/, '') === normUrl);
+      if (existing) {
+        return existing;
+      }
+
       const newGroup: FacebookGroup = {
         ...data,
         id: `grp-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -1094,6 +1101,7 @@ class LeadHubSharedStore {
   }
 
   public addTemplate(data: {
+    id?: string;
     service_id: string;
     title: string;
     template_content: string;
@@ -1104,7 +1112,7 @@ class LeadHubSharedStore {
     return this.withFileLock(() => {
       const storeData = this.readData();
       const newTemplate: OutreachTemplate = {
-        id: 'tpl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7),
+        id: data.id || ('tpl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7)),
         service_id: data.service_id,
         title: data.title.trim(),
         template_content: data.template_content.trim(),
@@ -1143,10 +1151,15 @@ class LeadHubSharedStore {
     return data.heartbeat;
   }
 
-  public updateOperatingMode(mode: 'manual_review' | 'auto_dispatch'): WorkerHeartbeat {
+  public updateOperatingMode(mode: 'manual_review' | 'auto_dispatch', minConfidence?: number): WorkerHeartbeat {
     return this.withFileLock(() => {
       const storeData = this.readData();
       storeData.heartbeat.operating_mode = mode;
+      if (typeof minConfidence === 'number') {
+        storeData.heartbeat.min_confidence_score = Math.max(0, Math.min(100, minConfidence));
+      } else if (storeData.heartbeat.min_confidence_score === undefined) {
+        storeData.heartbeat.min_confidence_score = 80;
+      }
       this.writeData(storeData);
       return storeData.heartbeat;
     });

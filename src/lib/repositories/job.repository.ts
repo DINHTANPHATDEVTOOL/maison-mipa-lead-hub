@@ -45,31 +45,31 @@ export class JobRepository {
           ELSE EXCLUDED.payload
         END,
         run_at = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN EXCLUDED.run_at
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN EXCLUDED.run_at
           ELSE scheduled_jobs.run_at
         END,
         status = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN 'pending'
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN 'pending'
           ELSE scheduled_jobs.status
         END,
         attempts = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN 0
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN 0
           ELSE scheduled_jobs.attempts
         END,
         locked_at = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN NULL
           ELSE scheduled_jobs.locked_at
         END,
         locked_by = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN NULL
           ELSE scheduled_jobs.locked_by
         END,
         claim_token = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN NULL
           ELSE scheduled_jobs.claim_token
         END,
         last_error = CASE 
-          WHEN scheduled_jobs.status = 'completed' THEN NULL
+          WHEN scheduled_jobs.status IN ('completed', 'failed') THEN NULL
           ELSE scheduled_jobs.last_error
         END,
         updated_at = NOW()

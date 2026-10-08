@@ -62,7 +62,10 @@ async function scheduleDueGroupCrawlJobs() {
  * Execute a single crawl job for a specific Facebook group
  */
 async function executeCrawlJob(groupId: string): Promise<number> {
-  const group = await groupRepo.getById(groupId);
+  let group = await groupRepo.getById(groupId).catch(() => null);
+  if (!group) {
+    group = store.getGroups().find(g => g.id === groupId) || null;
+  }
   if (!group || group.status !== 'active') return 0;
 
   console.log(`[Worker] Bắt đầu quét nhóm "${group.name}" (ID: ${group.id})...`);
@@ -70,7 +73,7 @@ async function executeCrawlJob(groupId: string): Promise<number> {
 
   // Update next check time (default 150s)
   const nextCheckTime = new Date(Date.now() + (group.check_interval_seconds || 150) * 1000).toISOString();
-  await groupRepo.updateCheckTimestamps(group.id, new Date().toISOString(), nextCheckTime);
+  await groupRepo.updateCheckTimestamps(group.id, new Date().toISOString(), nextCheckTime, crawlResult.posts.length);
 
   if (!crawlResult.success) {
     if (crawlResult.needsAuth) {
@@ -107,24 +110,30 @@ async function executeCrawlJob(groupId: string): Promise<number> {
 
       console.log(`[Worker] Bài mới từ ${post.author_name}: Ý định = ${classification.intent} (${classification.confidence_score}%)`);
 
-      // Check current operating mode from DB immediately before deciding to auto-dispatch
+      // Check current operating mode and threshold from DB/Store immediately before deciding to auto-dispatch
       const currentHeartbeat = await heartbeatRepo.getHeartbeat(WORKER_ID).catch(() => null);
-      const isAutoDispatch = currentHeartbeat?.operating_mode === 'auto_dispatch';
+      const storeHeartbeat = store.getHeartbeat();
+      const isAutoDispatch = (currentHeartbeat?.operating_mode || storeHeartbeat?.operating_mode) === 'auto_dispatch';
+      const minConfidence = currentHeartbeat?.min_confidence_score ?? storeHeartbeat?.min_confidence_score ?? 80;
 
       if (
         isAutoDispatch &&
         classification.intent === 'looking_for_service' &&
         classification.suggested_comment_text
       ) {
-        console.log(`[Worker Auto-Dispatch] Tiến hành đăng bình luận tiếp cận: ${post.post_url}`);
-        await outreachDispatchService.dispatchOutreach({
-          postId: post.id,
-          commentContent: classification.suggested_comment_text,
-          operatorName: 'Worker Tự Động',
-          pageIdentity: process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
-          targetPageId: process.env.FACEBOOK_PAGE_ID,
-          templateId: classification.suggested_template_id || undefined,
-        });
+        if (classification.confidence_score >= minConfidence) {
+          console.log(`[Worker Auto-Dispatch] Đạt ngưỡng tin cậy (${classification.confidence_score}% >= ${minConfidence}%). Tiến hành đăng bình luận: ${post.post_url}`);
+          await outreachDispatchService.dispatchOutreach({
+            postId: post.id,
+            commentContent: classification.suggested_comment_text,
+            operatorName: 'Worker Tự Động',
+            pageIdentity: process.env.FACEBOOK_PAGE_NAME || 'Maison MIPA',
+            targetPageId: process.env.FACEBOOK_PAGE_ID,
+            templateId: classification.suggested_template_id || undefined,
+          });
+        } else {
+          console.log(`[Worker Auto-Dispatch] Bỏ qua đăng tự động do độ phù hợp ${classification.confidence_score}% < ${minConfidence}%. Chuyển sang hàng chờ duyệt thủ công: ${post.post_url}`);
+        }
       }
     }
   }
@@ -195,15 +204,26 @@ async function processWorkerTick() {
     } else {
       // 2b. Standalone / File Store Automatic Scheduler:
       // Scan any active group whose next_check_at has arrived or passed
-      const allGroups = store.getGroups().filter(g => g.status === 'active');
+      const allGroups = (await groupRepo.getAll().catch(() => store.getGroups())).filter(g => g.status === 'active');
       const now = Date.now();
-      const dueGroup = allGroups.find(g => {
+      const dueGroups = allGroups.filter(g => {
         const nextCheck = g.next_check_at ? new Date(g.next_check_at).getTime() : 0;
         return now >= nextCheck;
       });
 
+      dueGroups.sort((a, b) => {
+        const timeA = a.next_check_at ? new Date(a.next_check_at).getTime() : 0;
+        const timeB = b.next_check_at ? new Date(b.next_check_at).getTime() : 0;
+        return timeA - timeB;
+      });
+
+      const dueGroup = dueGroups[0];
+
       if (dueGroup) {
         console.log(`[Worker] Tự động quét nhóm theo chu kỳ: "${dueGroup.name}" (${dueGroup.id}). Hạn quét: ${dueGroup.next_check_at || 'Ngay bây giờ'}`);
+        // Advance next_check_at immediately to prevent retry storms
+        const nextCheckTime = new Date(Date.now() + (dueGroup.check_interval_seconds || 150) * 1000).toISOString();
+        await groupRepo.updateCheckTimestamps(dueGroup.id, new Date().toISOString(), nextCheckTime).catch(() => {});
         try {
           const newCount = await executeCrawlJob(dueGroup.id);
           console.log(`[Worker] Quét hoàn tất nhóm "${dueGroup.name}": phát hiện ${newCount} bài viết.`);

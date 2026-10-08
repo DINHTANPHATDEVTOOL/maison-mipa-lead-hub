@@ -37,6 +37,7 @@ import {
 import { FacebookPost, FacebookGroup, CRMLead, CRMStage, ServiceItem } from '@/types';
 import { FacebookProfile } from '@/lib/profiles';
 import { apiFetch } from '@/lib/api-client';
+import AutoOutreachLogViewer from '@/components/AutoOutreachLogViewer';
 
 const CRM_STAGES: { key: CRMStage; label: string; color: string; bg: string }[] = [
   { key: 'uncontacted', label: 'Chờ phản hồi', color: 'text-zinc-400', bg: 'bg-zinc-800' },
@@ -75,7 +76,7 @@ export default function PhoneFarmControlHub() {
   const [editedComments, setEditedComments] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
 
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'matrix' | 'posts' | 'crm' | 'groups'>('matrix');
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'matrix' | 'posts' | 'crm' | 'groups' | 'logs'>('matrix');
   const [previewImageModal, setPreviewImageModal] = useState<string | null>(null);
   const [imageModalError, setImageModalError] = useState(false);
 
@@ -128,6 +129,11 @@ export default function PhoneFarmControlHub() {
   const [newGroupInterval, setNewGroupInterval] = useState('150');
   const [newGroupLookback, setNewGroupLookback] = useState('24');
 
+  // Operating Mode & Confidence Threshold
+  const [operatingMode, setOperatingMode] = useState<'manual_review' | 'auto_dispatch'>('manual_review');
+  const [minConfidenceScore, setMinConfidenceScore] = useState<number>(80);
+  const [isTogglingMode, setIsTogglingMode] = useState(false);
+
   // Initial Data Load
   useEffect(() => {
     loadAllData();
@@ -138,12 +144,13 @@ export default function PhoneFarmControlHub() {
   const loadAllData = async () => {
     setIsLoading(true);
     try {
-      const [resProf, resPosts, resLeads, resGroups, resServices] = await Promise.all([
+      const [resProf, resPosts, resLeads, resGroups, resServices, resHeartbeat] = await Promise.all([
         apiFetch('/api/worker/profiles').then(r => r.json()).catch(() => ({ success: false })),
         apiFetch('/api/posts').then(r => r.json()).catch(() => ({ success: false })),
         apiFetch('/api/leads').then(r => r.json()).catch(() => ({ success: false })),
         apiFetch('/api/groups').then(r => r.json()).catch(() => ({ success: false })),
         apiFetch('/api/services').then(r => r.json()).catch(() => ({ success: false })),
+        apiFetch('/api/worker/heartbeat').then(r => r.json()).catch(() => ({ success: false })),
       ]);
 
       if (resProf.success) setProfiles(resProf.data || []);
@@ -151,12 +158,41 @@ export default function PhoneFarmControlHub() {
       if (resLeads.success) setLeads(resLeads.data || []);
       if (resGroups.success) setGroups(resGroups.data || []);
       if (resServices.success) setServices(resServices.data || []);
+      if (resHeartbeat.success && resHeartbeat.data) {
+        setOperatingMode(resHeartbeat.data.operating_mode || 'manual_review');
+        if (resHeartbeat.data.min_confidence_score !== undefined) {
+          setMinConfidenceScore(resHeartbeat.data.min_confidence_score);
+        }
+      }
 
       await checkWorkerStatus();
     } catch (e) {
       console.error(e);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleToggleOperatingMode = async () => {
+    setIsTogglingMode(true);
+    const nextMode = operatingMode === 'auto_dispatch' ? 'manual_review' : 'auto_dispatch';
+    try {
+      const res = await apiFetch('/api/worker/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operating_mode: nextMode, min_confidence_score: minConfidenceScore }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setOperatingMode(nextMode);
+        setNotice(`Đã chuyển sang chế độ: ${nextMode === 'auto_dispatch' ? `Tự động gửi (Độ phù hợp ≥ ${minConfidenceScore}%)` : 'Duyệt thủ công trước khi gửi'}`);
+      } else {
+        alert('Lỗi: ' + (data.error || 'Không thể chuyển chế độ'));
+      }
+    } catch (e: any) {
+      alert('Lỗi: ' + e.message);
+    } finally {
+      setIsTogglingMode(false);
     }
   };
 
@@ -719,6 +755,24 @@ export default function PhoneFarmControlHub() {
               )}
             </button>
 
+            {/* Operating Mode (Auto-Dispatch vs Manual Review) Button */}
+            <button
+              onClick={handleToggleOperatingMode}
+              disabled={isTogglingMode}
+              className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl font-bold text-xs transition-all shadow-lg ${
+                operatingMode === 'auto_dispatch'
+                  ? 'bg-cyan-600 hover:bg-cyan-500 text-white border border-cyan-400/40 shadow-cyan-900/30'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-amber-500/30'
+              }`}
+              title="Bấm để bật/tắt chế độ tự động gửi bình luận tiếp cận (Ngưỡng phù hợp ≥ 80%)"
+            >
+              <span>
+                {operatingMode === 'auto_dispatch'
+                  ? `⚡ TỰ ĐỘNG GỬI (ĐỘ KHỚP ≥ ${minConfidenceScore}%)`
+                  : `✋ DUYỆT TAY TRƯỚC (≥ ${minConfidenceScore}%)`}
+              </span>
+            </button>
+
             {/* Add New Profile Button */}
             <button
               onClick={() => setIsAddProfileModalOpen(true)}
@@ -736,6 +790,20 @@ export default function PhoneFarmControlHub() {
             >
               <DollarSign className="w-4 h-4 text-amber-400" />
               <span>Giá Gói Chụp ({services.length})</span>
+            </button>
+
+            {/* Quick View Auto Outreach Log Button */}
+            <button
+              onClick={() => setActiveWorkspaceTab('logs')}
+              className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-xl font-bold text-xs transition-colors border shadow-sm ${
+                activeWorkspaceTab === 'logs'
+                  ? 'bg-purple-600 text-white border-purple-400/40 shadow-purple-950/40'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-purple-300 border-purple-500/30'
+              }`}
+              title="Xem trực tiếp bài viết nào đã được bình luận tự động và vào giờ nào"
+            >
+              <Terminal className="w-4 h-4 text-purple-400" />
+              <span>Ô Log Tự Động</span>
             </button>
 
             {/* Refresh Data */}
@@ -1022,6 +1090,18 @@ export default function PhoneFarmControlHub() {
           >
             <Users className="w-4 h-4" />
             <span>4. ĐƯỜNG ỐNG KHÁCH HÀNG CRM ({leads.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveWorkspaceTab('logs')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeWorkspaceTab === 'logs'
+                ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/40'
+                : 'bg-zinc-900 text-zinc-400 hover:text-white'
+            }`}
+          >
+            <Terminal className="w-4 h-4" />
+            <span>5. Ô LOG TỰ ĐỘNG BÌNH LUẬN & HOẠT ĐỘNG</span>
           </button>
         </div>
 
@@ -1659,6 +1739,13 @@ export default function PhoneFarmControlHub() {
             })}
           </div>
         </div>
+      )}
+
+      {/* =========================================================================
+          5. Ô LOG TỰ ĐỘNG BÌNH LUẬN & HOẠT ĐỘNG WORKER
+      ========================================================================== */}
+      {activeWorkspaceTab === 'logs' && (
+        <AutoOutreachLogViewer />
       )}
 
       {/* =========================================================================

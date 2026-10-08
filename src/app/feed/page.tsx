@@ -46,6 +46,10 @@ export default function FeedQueuePage() {
     return url;
   };
 
+  const [operatingMode, setOperatingMode] = useState<'manual_review' | 'auto_dispatch'>('manual_review');
+  const [minConfidenceScore, setMinConfidenceScore] = useState<number>(80);
+  const [isTogglingMode, setIsTogglingMode] = useState(false);
+
   useEffect(() => {
     fetchPosts();
   }, []);
@@ -53,15 +57,46 @@ export default function FeedQueuePage() {
   const fetchPosts = async () => {
     setIsLoading(true);
     try {
-      const res = await apiFetch('/api/posts');
-      const data = await res.json();
-      if (data.success) {
-        setPosts(data.data);
+      const [resPosts, resHeartbeat] = await Promise.all([
+        apiFetch('/api/posts').then(r => r.json()).catch(() => ({ success: false })),
+        apiFetch('/api/worker/heartbeat').then(r => r.json()).catch(() => ({ success: false })),
+      ]);
+      if (resPosts.success) {
+        setPosts(resPosts.data);
+      }
+      if (resHeartbeat.success && resHeartbeat.data) {
+        setOperatingMode(resHeartbeat.data.operating_mode || 'manual_review');
+        if (resHeartbeat.data.min_confidence_score !== undefined) {
+          setMinConfidenceScore(resHeartbeat.data.min_confidence_score);
+        }
       }
     } catch (e) {
       console.error(e);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleToggleMode = async () => {
+    setIsTogglingMode(true);
+    const nextMode = operatingMode === 'auto_dispatch' ? 'manual_review' : 'auto_dispatch';
+    try {
+      const res = await apiFetch('/api/worker/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operating_mode: nextMode, min_confidence_score: minConfidenceScore }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setOperatingMode(nextMode);
+        setActionNotice(`Đã chuyển sang: ${nextMode === 'auto_dispatch' ? `Tự động gửi (Độ khớp ≥ ${minConfidenceScore}%)` : 'Duyệt tay trước khi gửi'}`);
+      } else {
+        alert('Lỗi: ' + (data.error || 'Không thể đổi chế độ'));
+      }
+    } catch (e: any) {
+      alert('Lỗi: ' + e.message);
+    } finally {
+      setIsTogglingMode(false);
     }
   };
 
@@ -184,6 +219,26 @@ export default function FeedQueuePage() {
           <p className="text-xs text-zinc-400 mt-1">
             Phân loại bài viết theo nhu cầu • Trích xuất gói dịch vụ, khu vực, thời gian • Duyệt mẫu tiếp cận chuẩn giá niêm yết
           </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleToggleMode}
+            disabled={isTogglingMode}
+            className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl font-bold text-xs transition-all shadow-md ${
+              operatingMode === 'auto_dispatch'
+                ? 'bg-cyan-600 hover:bg-cyan-500 text-white border border-cyan-400/40 shadow-cyan-900/30'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-amber-500/30'
+            }`}
+            title="Bấm để bật/tắt nhanh chế độ tự động gửi tiếp cận (Ngưỡng phù hợp ≥ 80%)"
+          >
+            <span>
+              {operatingMode === 'auto_dispatch'
+                ? `⚡ TỰ ĐỘNG GỬI (ĐỘ KHỚP ≥ ${minConfidenceScore}%)`
+                : `✋ DUYỆT TAY TRƯỚC (≥ ${minConfidenceScore}%)`}
+            </span>
+          </button>
         </div>
       </div>
 

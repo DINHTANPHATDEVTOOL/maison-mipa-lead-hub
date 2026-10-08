@@ -56,8 +56,15 @@ export function parseAnyCookieOrStorageState(raw: string): { cookies: any[]; ori
 
 export class FacebookAuthManager {
   private encryptionKey: string;
+  private sessionDir: string;
+  private sessionFile: string;
+  private encryptedSessionFile: string;
 
-  constructor(encryptionKey?: string) {
+  constructor(encryptionKey?: string, customSessionDir?: string) {
+    this.sessionDir = customSessionDir || SESSION_DIR;
+    this.sessionFile = path.join(this.sessionDir, 'facebook_storage_state.json');
+    this.encryptedSessionFile = path.join(this.sessionDir, 'facebook_storage_state.enc');
+
     const envKey = process.env.FACEBOOK_SESSION_ENCRYPTION_KEY?.trim();
     const isBuildPhase = process.env.NEXT_PHASE === 'phase-production-build' || process.env.npm_lifecycle_event === 'build';
     if (process.env.NODE_ENV === 'production' && !isBuildPhase && !envKey && !encryptionKey) {
@@ -71,15 +78,17 @@ export class FacebookAuthManager {
       }
     }
     this.encryptionKey = encryptionKey || envKey || this.deriveMachineKey();
-    if (!fs.existsSync(SESSION_DIR)) {
-      fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
+    if (!fs.existsSync(this.sessionDir)) {
+      fs.mkdirSync(this.sessionDir, { recursive: true, mode: 0o700 });
     }
   }
 
   public deleteSession(): void {
     try {
-      if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
-      if (fs.existsSync(ENCRYPTED_SESSION_FILE)) fs.unlinkSync(ENCRYPTED_SESSION_FILE);
+      if (fs.existsSync(this.sessionFile)) fs.unlinkSync(this.sessionFile);
+      if (fs.existsSync(this.encryptedSessionFile)) fs.unlinkSync(this.encryptedSessionFile);
+      const tempFile = path.join(this.sessionDir, 'decrypted_temp_storage_state.json');
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     } catch (e) {
       console.error('[AuthManager] Lỗi khi xóa phiên đăng nhập:', e);
     }
@@ -87,7 +96,7 @@ export class FacebookAuthManager {
 
   public clearPlaintextSession(): void {
     try {
-      if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+      if (fs.existsSync(this.sessionFile)) fs.unlinkSync(this.sessionFile);
     } catch {}
   }
 
@@ -98,27 +107,33 @@ export class FacebookAuthManager {
   }
 
   public hasStoredSession(): boolean {
-    return fs.existsSync(ENCRYPTED_SESSION_FILE) || fs.existsSync(SESSION_FILE);
+    if (fs.existsSync(this.encryptedSessionFile) || fs.existsSync(this.sessionFile)) return true;
+    const profilesDir = path.join(this.sessionDir, 'profiles');
+    if (fs.existsSync(profilesDir)) {
+      const files = fs.readdirSync(profilesDir).filter((f) => f.endsWith('.enc'));
+      if (files.length > 0) return true;
+    }
+    return false;
   }
 
   public getSessionPath(): string | null {
-    if (fs.existsSync(SESSION_FILE)) {
-      const summary = this.validateStorageStateFile(SESSION_FILE);
-      if (summary.valid) return SESSION_FILE;
+    if (fs.existsSync(this.sessionFile)) {
+      const summary = this.validateStorageStateFile(this.sessionFile);
+      if (summary.valid) return this.sessionFile;
     }
-    if (fs.existsSync(ENCRYPTED_SESSION_FILE)) {
+    if (fs.existsSync(this.encryptedSessionFile)) {
       const decrypted = this.decryptSession();
       if (decrypted) {
-        fs.writeFileSync(SESSION_FILE, decrypted, { encoding: 'utf-8', mode: 0o600 });
-        const summary = this.validateStorageStateFile(SESSION_FILE);
-        if (summary.valid) return SESSION_FILE;
+        fs.writeFileSync(this.sessionFile, decrypted, { encoding: 'utf-8', mode: 0o600 });
+        const summary = this.validateStorageStateFile(this.sessionFile);
+        if (summary.valid) return this.sessionFile;
       }
     }
     return null;
   }
 
   public getStorageState(): { cookies: any[]; origins?: any[] } | null {
-    if (fs.existsSync(ENCRYPTED_SESSION_FILE)) {
+    if (fs.existsSync(this.encryptedSessionFile)) {
       const decrypted = this.decryptSession();
       if (decrypted) {
         try {
@@ -131,9 +146,9 @@ export class FacebookAuthManager {
         } catch {}
       }
     }
-    if (fs.existsSync(SESSION_FILE)) {
+    if (fs.existsSync(this.sessionFile)) {
       try {
-        const raw = fs.readFileSync(SESSION_FILE, 'utf-8');
+        const raw = fs.readFileSync(this.sessionFile, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.cookies)) {
           const hasCUser = parsed.cookies.some((c: any) => c.name === 'c_user');
@@ -142,11 +157,23 @@ export class FacebookAuthManager {
         }
       } catch {}
     }
+
+    // Fallback: Check if any active profile session exists in profiles/*.enc
+    const profilesDir = path.join(this.sessionDir, 'profiles');
+    if (fs.existsSync(profilesDir)) {
+      const files = fs.readdirSync(profilesDir).filter((f) => f.endsWith('.enc'));
+      for (const file of files) {
+        const pId = file.replace(/\.enc$/, '');
+        const pState = this.getProfileStorageState(pId);
+        if (pState) return pState;
+      }
+    }
+
     return null;
   }
 
   public getProfileSessionFile(profileId: string): string {
-    const dir = path.join(SESSION_DIR, 'profiles');
+    const dir = path.join(this.sessionDir, 'profiles');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     return path.join(dir, `${profileId}.enc`);
   }
@@ -272,11 +299,11 @@ export class FacebookAuthManager {
 
       // Combined payload: [12 bytes IV][16 bytes TAG][Ciphertext]
       const payload = Buffer.concat([iv, tag, encrypted]);
-      fs.writeFileSync(ENCRYPTED_SESSION_FILE, payload, { mode: 0o600 });
+      fs.writeFileSync(this.encryptedSessionFile, payload, { mode: 0o600 });
 
       // Clean up any plaintext session file on disk to prevent plaintext leakage
-      if (fs.existsSync(SESSION_FILE)) {
-        try { fs.unlinkSync(SESSION_FILE); } catch {}
+      if (fs.existsSync(this.sessionFile)) {
+        try { fs.unlinkSync(this.sessionFile); } catch {}
       }
 
       return { success: true };
@@ -287,9 +314,9 @@ export class FacebookAuthManager {
   }
 
   private decryptSession(): string | null {
-    if (!fs.existsSync(ENCRYPTED_SESSION_FILE)) return null;
+    if (!fs.existsSync(this.encryptedSessionFile)) return null;
     try {
-      const payload = fs.readFileSync(ENCRYPTED_SESSION_FILE);
+      const payload = fs.readFileSync(this.encryptedSessionFile);
       if (payload.length < 28) {
         // Fallback check if it was legacy hex format
         return this.decryptLegacyHex(payload.toString('utf-8'));
@@ -362,10 +389,31 @@ export class FacebookAuthManager {
     filePath: string | null;
     reason?: string;
   } {
-    const hasEnc = fs.existsSync(ENCRYPTED_SESSION_FILE);
-    const hasPlain = fs.existsSync(SESSION_FILE);
+    const hasEnc = fs.existsSync(this.encryptedSessionFile);
+    const hasPlain = fs.existsSync(this.sessionFile);
 
     if (!hasEnc && !hasPlain) {
+      const profilesDir = path.join(this.sessionDir, 'profiles');
+      if (fs.existsSync(profilesDir)) {
+        const profileFiles = fs.readdirSync(profilesDir).filter((f) => f.endsWith('.enc'));
+        if (profileFiles.length > 0) {
+          const firstProfileId = profileFiles[0].replace(/\.enc$/, '');
+          const pSummary = this.getProfileSummary(firstProfileId);
+          if (pSummary.exists) {
+            const pPath = path.join(profilesDir, profileFiles[0]);
+            const pStat = fs.statSync(pPath);
+            return {
+              exists: true,
+              valid: pSummary.valid,
+              userId: pSummary.userId,
+              lastUpdated: pStat.mtime.toISOString(),
+              filePath: pPath,
+              reason: pSummary.valid ? `Phiên thiết bị [${firstProfileId}] hợp lệ.` : 'Phiên thiết bị không hợp lệ.',
+            };
+          }
+        }
+      }
+
       return {
         exists: false,
         valid: false,
@@ -376,17 +424,17 @@ export class FacebookAuthManager {
       };
     }
 
-    const targetFile = hasPlain ? SESSION_FILE : ENCRYPTED_SESSION_FILE;
+    const targetFile = hasPlain ? this.sessionFile : this.encryptedSessionFile;
     const stat = fs.statSync(targetFile);
 
     if (hasPlain) {
-      const validation = this.validateStorageStateFile(SESSION_FILE);
+      const validation = this.validateStorageStateFile(this.sessionFile);
       return {
         exists: true,
         valid: validation.valid,
         userId: validation.userId || null,
         lastUpdated: stat.mtime.toISOString(),
-        filePath: SESSION_FILE,
+        filePath: this.sessionFile,
         reason: validation.reason,
       };
     }
@@ -399,7 +447,7 @@ export class FacebookAuthManager {
         valid: false,
         userId: null,
         lastUpdated: stat.mtime.toISOString(),
-        filePath: ENCRYPTED_SESSION_FILE,
+        filePath: this.encryptedSessionFile,
         reason: 'Không thể giải mã file phiên đăng nhập (khóa không đúng hoặc file hỏng).',
       };
     }
@@ -414,7 +462,7 @@ export class FacebookAuthManager {
         valid,
         userId: cUser?.value || null,
         lastUpdated: stat.mtime.toISOString(),
-        filePath: ENCRYPTED_SESSION_FILE,
+        filePath: this.encryptedSessionFile,
         reason: valid ? 'Phiên đăng nhập hợp lệ và được mã hóa AES-256-GCM.' : 'Thiếu cookie Facebook cốt lõi.',
       };
     } catch {
@@ -423,7 +471,7 @@ export class FacebookAuthManager {
         valid: false,
         userId: null,
         lastUpdated: stat.mtime.toISOString(),
-        filePath: ENCRYPTED_SESSION_FILE,
+        filePath: this.encryptedSessionFile,
         reason: 'Nội dung giải mã không phải JSON hợp lệ.',
       };
     }

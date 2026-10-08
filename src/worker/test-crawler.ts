@@ -1,8 +1,4 @@
-/**
- * KIỂM CHỨNG GIAI ĐOẠN A: Đọc Bài Mới & Bóc Tách DOM Nhóm Mẫu
- * Chạy: npm run test:crawler
- */
-
+import '../lib/env';
 import { groupCrawler } from './crawler';
 import { authManager } from './auth';
 import { classifyPostContent } from '../lib/classifier';
@@ -23,7 +19,8 @@ async function runCrawlerVerification() {
     return;
   }
 
-  const testGroupUrl = 'https://facebook.com/groups/hoidammechupaodaivn';
+  const configuredGroups = store.getGroups();
+  const testGroupUrl = configuredGroups.length > 0 ? configuredGroups[0].url : 'https://facebook.com/groups/thochupanhhochiminh';
   console.log(`[1] Bắt đầu thử nghiệm quét nhóm mẫu: ${testGroupUrl}`);
 
   const crawlResult = await groupCrawler.crawlGroup(testGroupUrl, 24);

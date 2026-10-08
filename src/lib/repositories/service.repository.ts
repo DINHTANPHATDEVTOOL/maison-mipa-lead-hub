@@ -118,6 +118,40 @@ export class ServiceRepository {
 
       if (res.rows.length > 0) {
         dbUpdated = this.mapRow(res.rows[0]);
+      } else {
+        // If row didn't exist in DB yet, insert it from store with the updates
+        const fullItem = store.getServices().find(s => s.id === id);
+        if (fullItem) {
+          const merged = { ...fullItem, ...updates };
+          const insertRes = await pool.query(`
+            INSERT INTO services (
+              id, code, name, base_price, price_note, service_area, includes_posing_support, is_active, created_at, updated_at
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              name = EXCLUDED.name,
+              base_price = EXCLUDED.base_price,
+              price_note = EXCLUDED.price_note,
+              service_area = EXCLUDED.service_area,
+              includes_posing_support = EXCLUDED.includes_posing_support,
+              is_active = EXCLUDED.is_active,
+              updated_at = NOW()
+            RETURNING *
+          `, [
+            merged.id,
+            merged.code,
+            merged.name,
+            merged.base_price,
+            merged.price_note || '',
+            merged.service_area || 'TP. Hồ Chí Minh',
+            merged.includes_posing_support ?? true,
+            merged.is_active ?? true,
+          ]);
+          if (insertRes.rows.length > 0) {
+            dbUpdated = this.mapRow(insertRes.rows[0]);
+          }
+        }
       }
     } catch {}
 
